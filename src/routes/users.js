@@ -55,7 +55,7 @@ router.post('/register', async (req, res) => {
 });
 
 /**
- * 2. LOGIN
+ * 2. LOGIN (Null-Safe for Phone Numbers)
  */
 router.post('/login', async (req, res) => {
     const { email, password } = req.body;
@@ -76,13 +76,19 @@ router.post('/login', async (req, res) => {
             success: true, 
             token, 
             user: { 
+                id: user.id,
+                full_name: user.full_name ?? "User", 
                 email: user.email, 
-                kyc_tier: user.kyc_tier,
-                kyc_status: user.kyc_status,
-                phone_verified: user.phone_verified
+                currency: user.preferred_currency ?? "USD",
+                kyc_tier: user.kyc_tier ?? 1,
+                kyc_status: user.kyc_status ?? 'NONE',
+                // Explicitly handling the early-stage null phone
+                phone_number: user.phone_number ?? null, 
+                phone_verified: user.phone_verified ?? false
             } 
         });
     } catch (err) {
+        console.error("Login Error:", err);
         res.status(500).json({ error: "Server error during login." });
     }
 });
