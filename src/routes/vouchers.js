@@ -1,24 +1,24 @@
 import express from 'express';
 import crypto from 'crypto';
-import axios from 'axios';
 import { query, getClient } from '../db/index.js';
 
 const router = express.Router();
 const OWNER_EMAIL = 'deepxverified@gmail.com'; // System Revenue Account
 
 /**
- * 1. CREATE VOUCHER & GENERATE PAYMENT LINK
- * This starts as PENDING. It only moves to LOCKED when the webhook confirms payment.
+ * 1. CREATE VOUCHER (DATABASE ONLY)
+ * Following Option 1: We stop calling Flutterwave here to avoid Redirect URL errors.
+ * The voucher starts as 'PENDING'.
  */
 router.post('/create', async (req, res) => {
-    const { payer_email, recipient_email, amount, currency, description } = req.body;
+    const { payer_email, recipient_email, recipient_name, amount, currency, description } = req.body;
 
     if (!payer_email || !recipient_email || !amount) {
         return res.status(400).json({ error: "Missing required fields." });
     }
 
     try {
-        // --- YOUR ORIGINAL KYC CHECK ---
+        // --- KYC CHECK ---
         const userCheck = await query(
             "SELECT kyc_tier, preferred_currency FROM users WHERE email = $1", 
             [payer_email]
@@ -28,7 +28,7 @@ router.post('/create', async (req, res) => {
         if (!user) return res.status(404).json({ error: "Creator not found." });
         if (user.kyc_tier < 1) return res.status(403).json({ error: "KYC Tier 1 required." });
 
-        // --- YOUR ORIGINAL HASHING LOGIC ---
+        // --- HASHING & ID GENERATION ---
         const selectedCurrency = currency || user.preferred_currency || 'USD';
         const rawKey = crypto.randomBytes(8).toString('hex');
         const hashedKey = crypto.createHash('sha256').update(rawKey).digest('hex');
@@ -38,46 +38,45 @@ router.post('/create', async (req, res) => {
         expiresAt.setDate(expiresAt.getDate() + 14); // 14-day expiry
 
         // 1. Save Voucher to DB (Status: PENDING)
+        // No external API calls are made here to ensure speed and stability.
         await query(
-            `INSERT INTO vouchers (id, creator_email, recipient_email, amount, currency, status, release_key_hash, expires_at, description) 
-             VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7, $8)`,
-            [voucherId, payer_email, recipient_email, amount, selectedCurrency, hashedKey, expiresAt, description || "FielPay Escrow"]
+            `INSERT INTO vouchers (id, creator_email, recipient_email, recipient_name, amount, currency, status, release_key_hash, expires_at, description) 
+             VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7, $8, $9)`,
+            [voucherId, payer_email, recipient_email, recipient_name, amount, selectedCurrency, hashedKey, expiresAt, description || "FielPay Escrow"]
         );
 
-        // 2. TRIGGER FLUTTERWAVE PAYMENT LINK
-        // This is the new part that makes the "Create" button actually generate a link
-        const flwResponse = await axios.post(
-            'https://api.flutterwave.com/v3/payments',
-            {
-                tx_ref: voucherId,
-                amount: amount,
-                currency: selectedCurrency,
-                redirect_url: `${process.env.FRONTEND_URL}/dashboard.html`,
-                customer: { email: payer_email },
-                customizations: {
-                    title: "FielPay Escrow Payment",
-                    description: `Funding Voucher ${voucherId}`
-                }
-            },
-            { headers: { Authorization: `Bearer ${process.env.FLW_SECRET_KEY}` } }
-        );
-
+        // 2. Return Success
+        // Frontend will build the link: https://fielpay.free.af/payment-link.html?v_id=VC-XXXXXX
         res.status(201).json({ 
             success: true,
-            voucherId, 
-            paymentLink: flwResponse.data.data.link, // Send this to the user to pay
-            releaseKey: rawKey, // Show this once to the creator
-            message: `Voucher created in ${selectedCurrency}. Fund it to activate escrow.`
+            voucher_code: voucherId, 
+            releaseKey: rawKey, 
+            message: `Voucher created in ${selectedCurrency}. Share the link to initiate payment.`
         });
+
     } catch (err) {
-        console.error("Create Error:", err.response?.data || err.message);
+        console.error("Create Error:", err.message);
         res.status(500).json({ error: "Internal server error." });
     }
 });
 
 /**
- * 2. WEBHOOK: FLUTTERWAVE SUCCESS
- * This is what moves the status from PENDING to LOCKED after payment.
+ * 2. GET VOUCHER DETAILS
+ * Used by payment-link.html to display details to the recipient.
+ */
+router.get('/:id', async (req, res) => {
+    try {
+        const result = await query("SELECT * FROM vouchers WHERE id = $1", [req.params.id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: "Voucher not found" });
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * 3. WEBHOOK: FLUTTERWAVE SUCCESS
+ * Moves status from PENDING to LOCKED after payment is confirmed.
  */
 router.post('/webhook/flutterwave', async (req, res) => {
     const signature = req.headers['verif-hash'];
@@ -96,7 +95,7 @@ router.post('/webhook/flutterwave', async (req, res) => {
             const v = vRes.rows[0];
 
             if (v) {
-                // Move from PENDING to LOCKED (Escrow is now active)
+                // Move to LOCKED (Escrow Active)
                 await client.query("UPDATE vouchers SET status = 'LOCKED' WHERE id = $1", [v.id]);
 
                 // Update Recipient's Escrow Balance
@@ -117,7 +116,7 @@ router.post('/webhook/flutterwave', async (req, res) => {
 });
 
 /**
- * 3. RELEASE FUNDS (YOUR ORIGINAL LOGIC)
+ * 4. RELEASE FUNDS
  * Credits Recipient (93%) and Owner (7%)
  */
 router.post('/release', async (req, res) => {
@@ -141,7 +140,6 @@ router.post('/release', async (req, res) => {
             throw new Error("Invalid release key or unauthorized access.");
         }
 
-        // --- YOUR ORIGINAL 7% SPLIT LOGIC ---
         const fee = parseFloat((v.amount * 0.07).toFixed(4));
         const netAmount = parseFloat(v.amount) - fee;
 
@@ -155,7 +153,7 @@ router.post('/release', async (req, res) => {
             [v.amount, netAmount, v.recipient_email]
         );
 
-        // 2. Credit Your Revenue Account (7%)
+        // 2. Credit Owner Revenue Account (7%)
         await client.query(`
             UPDATE wallets SET 
                 available_balance = available_balance + $1,
@@ -187,7 +185,7 @@ router.post('/release', async (req, res) => {
 });
 
 /**
- * 4. DISPUTE (YOUR ORIGINAL LOGIC)
+ * 5. DISPUTE
  */
 router.post('/dispute', async (req, res) => {
     const { voucherId, userEmail, reason } = req.body;
