@@ -21,8 +21,30 @@ const app = express();
 const OWNER_EMAIL = 'deepxverified@gmail.com';
 
 // --- 1. Middleware ---
-app.use(helmet()); 
-app.use(cors()); 
+
+/** * HELMET UPDATE: 
+ * Standard helmet settings can block cross-origin resource sharing.
+ * We configure it to allow your frontend to interact with the API.
+ */
+app.use(helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" }
+})); 
+
+/**
+ * CORS UPDATE: 
+ * We explicitly whitelist your InfinityFree subdomain.
+ * This prevents the "Server connection failed" error in the browser.
+ */
+app.use(cors({
+    origin: [
+        'https://fielpay.free.nf', 
+        'http://fielpay.free.nf'
+    ],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+}));
+
 app.use(express.json());
 app.use(morgan('dev')); 
 
@@ -47,8 +69,6 @@ app.get('/', (req, res) => {
 });
 
 // --- 4. Cron Logic (Refactored for Serverless) ---
-// Note: node-cron doesn't work on Vercel. 
-// You can call this endpoint via a Vercel Cron Job.
 app.get('/api/cron/cleanup', async (req, res) => {
     console.log("CRON: Auto-disputing expired vouchers...");
     try {
@@ -74,5 +94,4 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // --- 6. Vercel Export ---
-
 export default app;

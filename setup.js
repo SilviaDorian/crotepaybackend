@@ -9,30 +9,48 @@ async function setup() {
         console.log("✅ Connection Successful!");
 
         const sql = `
+            -- 1. VOUCHERS TABLE: Tracks the payment request
             CREATE TABLE IF NOT EXISTS vouchers (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                payer_email TEXT NOT NULL,
-                recipient_email TEXT NOT NULL,
-                amount DECIMAL(20, 2) NOT NULL,
-                currency VARCHAR(5) NOT NULL, 
-                status VARCHAR(20) DEFAULT 'PENDING',
+                id TEXT PRIMARY KEY, -- Using custom IDs like VC-123456
+                creator_email TEXT NOT NULL, -- The Seller/Service Provider
+                recipient_email TEXT NOT NULL, -- The Client/Payer
+                recipient_name TEXT,
+                amount DECIMAL(20, 4) NOT NULL,
+                currency VARCHAR(10) NOT NULL, 
+                status VARCHAR(20) DEFAULT 'PENDING', -- PENDING, LOCKED, RELEASED, DISPUTED
                 release_key_hash TEXT NOT NULL,
+                description TEXT,
+                category TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS ledger (
+            -- 2. WALLETS TABLE: The Digital Ledger
+            -- This tracks 'value' owned by users in your system
+            CREATE TABLE IF NOT EXISTS wallets (
+                user_email TEXT PRIMARY KEY,
+                available_balance DECIMAL(20, 4) DEFAULT 0, -- Funds ready to withdraw
+                escrow_balance DECIMAL(20, 4) DEFAULT 0,    -- Funds currently held in escrow
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- 3. TRANSACTIONS TABLE: History of all ledger movements
+            CREATE TABLE IF NOT EXISTS transactions (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                voucher_id UUID REFERENCES vouchers(id),
-                amount DECIMAL(20, 2) NOT NULL,
-                currency VARCHAR(5) NOT NULL,
-                entry_type VARCHAR(20) NOT NULL,
+                user_email TEXT NOT NULL,
+                voucher_id TEXT REFERENCES vouchers(id),
+                transaction_type VARCHAR(50) NOT NULL, -- 'ESCROW_PAYMENT', 'ESCROW_RELEASE', 'WITHDRAWAL'
+                amount_usd DECIMAL(20, 4) NOT NULL,
+                fee_usd DECIMAL(20, 4) DEFAULT 0,
+                status VARCHAR(20) DEFAULT 'SUCCESSFUL',
+                reference_id TEXT, -- Flutterwave TX ID or internal ref
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         `;
 
         await client.query(sql);
-        console.log("✅ Tables 'vouchers' and 'ledger' created successfully!");
+        console.log("✅ Tables 'vouchers', 'wallets', and 'transactions' initialized!");
 
     } catch (err) {
         console.error("❌ SETUP FAILED:", err.message);

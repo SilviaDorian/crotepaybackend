@@ -8,7 +8,7 @@ const router = express.Router();
 // Configuration & Exceptions
 const OWNER_EMAIL = 'deepxverified@gmail.com';
 const BYPASS_EMAILS = ['deepxverified@gmail.com', 'mitounamadike@gmail.com', 'tester@fielpay.com'];
-const SERVICE_FEE_PERCENT = 0.07; // 7%
+const SERVICE_FEE_PERCENT = 0.07; // 7% System Fee
 
 const MIN_LIMITS = {
     'NGN': 5000, 'USD': 50, 'EUR': 50, 'GBP': 50,
@@ -16,8 +16,7 @@ const MIN_LIMITS = {
 };
 
 /**
- * 1. GET BANKS BY COUNTRY (Worldwide Flexibility)
- * Call this from frontend when currency changes
+ * 1. GET BANKS BY COUNTRY
  */
 router.get('/banks/:country', async (req, res) => {
     try {
@@ -51,6 +50,7 @@ router.post('/verify-account', async (req, res) => {
 
 /**
  * 3. REQUEST WITHDRAWAL
+ * Deducts from Available Balance and triggers physical transfer.
  */
 router.post('/request', async (req, res) => {
     const { email, amount, bankCode, accountNumber, currency } = req.body;
@@ -58,7 +58,7 @@ router.post('/request', async (req, res) => {
     const isTester = BYPASS_EMAILS.includes(email);
     
     if (!amount || isNaN(amount) || amount <= 0) {
-        return res.status(400).json({ error: "Invalid amount." });
+        return res.status(400).json({ error: "Invalid withdrawal amount." });
     }
 
     const client = await getClient();
@@ -66,6 +66,7 @@ router.post('/request', async (req, res) => {
     try {
         await client.query('BEGIN');
 
+        // Fetch user and wallet details
         const userRes = await client.query(
             `SELECT u.email, u.kyc_tier, w.available_balance, w.daily_withdraw_limit 
              FROM users u 
@@ -75,51 +76,63 @@ router.post('/request', async (req, res) => {
         );
         
         const user = userRes.rows[0];
-        if (!user) throw new Error("Account not found.");
+        if (!user) throw new Error("Account or Wallet not found.");
 
-        // --- BYPASS LOGIC FOR TESTERS ---
+        const requestedAmount = parseFloat(amount);
+
+        // --- VALIDATION (Bypassed for testers) ---
         if (!isTester) {
-            if (user.kyc_tier < 2) throw new Error("Tier 2 KYC required.");
-            if (parseFloat(amount) > parseFloat(user.daily_withdraw_limit)) throw new Error("Daily limit exceeded.");
-            if (parseFloat(user.available_balance) < parseFloat(amount)) throw new Error("Insufficient balance.");
+            if (user.kyc_tier < 2) throw new Error("KYC Tier 2 (Identity Verification) required for withdrawals.");
+            if (requestedAmount > parseFloat(user.daily_withdraw_limit)) throw new Error("Daily withdrawal limit exceeded.");
+            if (parseFloat(user.available_balance) < requestedAmount) throw new Error("Insufficient available balance.");
         }
 
-        // Fee Calculation (Always 7% of USD amount)
-        const serviceFeeUsd = amount * SERVICE_FEE_PERCENT;
-        const netAmountUsd = amount - serviceFeeUsd;
+        // --- FEE LOGIC ---
+        // The ledger records the GROSS amount being deducted
+        const serviceFeeUsd = requestedAmount * SERVICE_FEE_PERCENT;
+        const netAmountUsd = requestedAmount - serviceFeeUsd;
 
-        // Payout via Utility
+        // --- PAYOUT EXECUTION ---
+        // We pass the net amount (after 7% fee) to the bank transfer utility
         const flwResponse = await triggerBankTransfer({
             amount: netAmountUsd,
             currency: targetCurrency, 
             bankCode,
             accountNumber,
+            // ID formatted for Webhook tracking: WD-TIME-EMAIL
             reference: `WD-${Date.now()}-${email.split('@')[0]}`
         });
 
-        // --- MINIMUM LIMIT CHECK (Bypassed for testers) ---
+        // --- MINIMUM LIMIT CHECK ---
         const minRequired = MIN_LIMITS[targetCurrency] || 50;
         if (!isTester && flwResponse.local_amount < minRequired) {
-            throw new Error(`Payout below minimum of ${minRequired} ${targetCurrency}.`);
+            throw new Error(`The converted payout is below the regional minimum of ${minRequired} ${targetCurrency}.`);
         }
 
-        // Deduct from DB
+        // --- LEDGER UPDATE ---
+        // Deduct the full amount from the digital ledger
         await client.query(
             "UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2",
-            [amount, email]
+            [requestedAmount, email]
         );
 
-        // Audit Trail
+        // --- RECORD TRANSACTION ---
         await client.query(`
             INSERT INTO transactions (
-                user_email, transaction_type, amount_usd, local_currency, local_amount, 
-                exchange_rate, status, reference_id, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+                user_email, transaction_type, amount_usd, fee_usd, status, reference_id, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
             [
-                email, 'WITHDRAWAL', amount, targetCurrency, 
-                flwResponse.local_amount, flwResponse.applied_rate, 'SUCCESS',
-                flwResponse.reference || `REF-${Date.now()}`,
-                JSON.stringify({ fee_usd: serviceFeeUsd, net_usd: netAmountUsd })
+                email, 
+                'WITHDRAWAL', 
+                requestedAmount, 
+                serviceFeeUsd, 
+                'PENDING', // Set to PENDING until Flutterwave Webhook confirms success
+                flwResponse.reference,
+                JSON.stringify({
+                    local_currency: targetCurrency,
+                    local_amount: flwResponse.local_amount,
+                    exchange_rate: flwResponse.applied_rate
+                })
             ]
         );
 
@@ -127,18 +140,19 @@ router.post('/request', async (req, res) => {
 
         res.json({ 
             success: true, 
-            message: "Withdrawal successful.", 
+            message: "Withdrawal initiated. Your bank account will be credited shortly.", 
             details: {
-                local_payout: `${flwResponse.local_amount} ${targetCurrency}`,
-                fee_charged: targetCurrency === 'NGN' ? `Applied at source` : `$${serviceFeeUsd.toFixed(2)}`
+                net_payout: `${flwResponse.local_amount} ${targetCurrency}`,
+                exchange_rate: flwResponse.applied_rate
             }
         });
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
+        console.error("Withdrawal Error:", err.message);
         res.status(400).json({ error: err.message });
     } finally {
-        client.release();
+        if (client) client.release();
     }
 });
 

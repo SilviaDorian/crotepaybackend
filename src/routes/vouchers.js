@@ -7,24 +7,27 @@ const OWNER_EMAIL = 'deepxverified@gmail.com'; // System Revenue Account
 
 /**
  * 1. CREATE VOUCHER (DATABASE ONLY)
+ * Creator = Seller/Service Provider (Requesting money)
+ * Recipient = Client/Buyer (Paying money)
  */
 router.post('/create', async (req, res) => {
-    const { payer_email, recipient_email, recipient_name, amount, currency, description, category } = req.body;
+    // Corrected variable names to match business logic
+    const { creator_email, recipient_email, recipient_name, amount, currency, description, category } = req.body;
 
-    if (!payer_email || !recipient_email || !amount) {
+    if (!creator_email || !recipient_email || !amount) {
         return res.status(400).json({ error: "Missing required fields." });
     }
 
     try {
-        // --- KYC CHECK ---
+        // --- KYC CHECK ON CREATOR ---
         const userCheck = await query(
             "SELECT kyc_tier, preferred_currency FROM users WHERE email = $1", 
-            [payer_email]
+            [creator_email]
         );
         const user = userCheck.rows[0];
 
         if (!user) return res.status(404).json({ error: "Creator not found." });
-        if (user.kyc_tier < 1) return res.status(403).json({ error: "KYC Tier 1 required." });
+        if (user.kyc_tier < 1) return res.status(403).json({ error: "KYC Tier 1 required to request payments." });
 
         // --- HASHING & ID GENERATION ---
         const selectedCurrency = currency || user.preferred_currency || 'USD';
@@ -35,18 +38,18 @@ router.post('/create', async (req, res) => {
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + 14); // 14-day expiry
 
-        // 1. Save Voucher to DB (Status: PENDING)
+        // Save Voucher to DB
         await query(
             `INSERT INTO vouchers (id, creator_email, recipient_email, recipient_name, amount, currency, status, release_key_hash, expires_at, description, category) 
              VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7, $8, $9, $10)`,
-            [voucherId, payer_email, recipient_email, recipient_name, amount, selectedCurrency, hashedKey, expiresAt, description || "FielPay Escrow", category || "General"]
+            [voucherId, creator_email, recipient_email, recipient_name, amount, selectedCurrency, hashedKey, expiresAt, description || "FielPay Escrow", category || "General"]
         );
 
         res.status(201).json({ 
             success: true,
             voucher_code: voucherId, 
             releaseKey: rawKey, 
-            message: `Voucher created in ${selectedCurrency}.`
+            message: `Payment request created.`
         });
 
     } catch (err) {
@@ -57,15 +60,15 @@ router.post('/create', async (req, res) => {
 
 /**
  * 2. GET VOUCHER DETAILS (PUBLIC ACCESS)
- * Uses LEFT JOIN to get creator's full name and country for the recipient/guest to see.
+ * Includes formatted Date and Time of creation.
  */
 router.get('/:id', async (req, res) => {
     try {
         const result = await query(
             `SELECT 
-                v.*, 
+                v.*,
                 u.full_name AS creator_name, 
-                u.country AS creator_country
+                u.country_name AS creator_country
              FROM vouchers v
              LEFT JOIN users u ON v.creator_email = u.email
              WHERE v.id = $1`, 
@@ -76,61 +79,31 @@ router.get('/:id', async (req, res) => {
             return res.status(404).json({ error: "Voucher not found" });
         }
 
-        // Return the full object including joined user details
-        res.json(result.rows[0]);
+        const voucher = result.rows[0];
+
+        // Format Date and Time for the UI
+        const createdAt = new Date(voucher.created_at);
+        const formattedDate = createdAt.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+        const formattedTime = createdAt.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+
+        res.json({
+            ...voucher,
+            display_date: formattedDate,
+            display_time: formattedTime,
+            created_at_iso: voucher.created_at // Original for sorting/logic
+        });
     } catch (err) {
         console.error("Fetch Voucher Error:", err.message);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Database error" });
     }
 });
 
 /**
- * 3. WEBHOOK: FLUTTERWAVE SUCCESS
- */
-router.post('/webhook/flutterwave', async (req, res) => {
-    const signature = req.headers['verif-hash'];
-    if (!signature || signature !== process.env.FLW_WEBHOOK_HASH) {
-        return res.status(401).end();
-    }
-
-    const { status, tx_ref } = req.body.data;
-
-    if (status === "successful") {
-        const client = await getClient();
-        try {
-            await client.query('BEGIN');
-            
-            // Extract the voucher ID from the tx_ref (Format used in frontend: FP-VC-ID-TIMESTAMP)
-            const vId = tx_ref.split('-')[2]; 
-
-            const vRes = await client.query("SELECT * FROM vouchers WHERE id = $1 AND status = 'PENDING'", [vId]);
-            const v = vRes.rows[0];
-
-            if (v) {
-                await client.query("UPDATE vouchers SET status = 'LOCKED' WHERE id = $1", [v.id]);
-                // Note: We don't update recipient balance here if they are a guest/unregistered. 
-                // The balance logic should handle "where user_email exists".
-                await client.query(
-                    "UPDATE wallets SET escrow_balance = escrow_balance + $1 WHERE user_email = $2",
-                    [v.amount, v.recipient_email]
-                );
-            }
-            await client.query('COMMIT');
-        } catch (e) {
-            await client.query('ROLLBACK');
-            console.error("Webhook Error:", e.message);
-        } finally {
-            client.release();
-        }
-    }
-    res.status(200).send("OK");
-});
-
-/**
- * 4. RELEASE FUNDS
+ * 3. RELEASE FUNDS (LEDGER MOVEMENT)
+ * Moves value from Client's Escrow Ledger to Creator's Available Ledger.
  */
 router.post('/release', async (req, res) => {
-    const { voucherId, releaseKey, payerEmail } = req.body;
+    const { voucherId, releaseKey } = req.body;
     const client = await getClient();
 
     try {
@@ -139,46 +112,48 @@ router.post('/release', async (req, res) => {
         const v = vResult.rows[0];
 
         if (!v) throw new Error("Voucher not found.");
-        if (v.status !== 'LOCKED') throw new Error(`Voucher status is ${v.status}.`);
+        if (v.status !== 'LOCKED') throw new Error(`Funds are ${v.status}, not in Escrow.`);
 
+        // Verify Key
         const hashedKey = crypto.createHash('sha256').update(releaseKey || "").digest('hex');
-        const isAuthorizedPayer = (payerEmail && v.creator_email === payerEmail);
-        const isValidKey = (v.release_key_hash === hashedKey);
-
-        if (!isAuthorizedPayer && !isValidKey) {
-            throw new Error("Invalid release key or unauthorized access.");
+        if (v.release_key_hash !== hashedKey) {
+            throw new Error("Invalid release key. Contact your client for the key.");
         }
 
-        const fee = parseFloat((v.amount * 0.07).toFixed(4));
-        const netAmount = parseFloat(v.amount) - fee;
+        const amount = parseFloat(v.amount);
+        const fee = parseFloat((amount * 0.07).toFixed(4)); // 7% System Fee
+        const netAmount = amount - fee;
 
-        await client.query(`
-            UPDATE wallets SET 
-                escrow_balance = escrow_balance - $1,
-                available_balance = available_balance + $2,
-                updated_at = NOW()
-            WHERE user_email = $3`,
-            [v.amount, netAmount, v.recipient_email]
+        // 1. Deduct from Client's (Recipient) Escrow Balance
+        await client.query(
+            "UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() WHERE user_email = $2",
+            [amount, v.recipient_email]
         );
 
-        await client.query(`
-            UPDATE wallets SET 
-                available_balance = available_balance + $1,
-                updated_at = NOW()
-            WHERE user_email = $2`,
+        // 2. Add Net to Creator's Available Balance (Ready for withdrawal)
+        await client.query(
+            "UPDATE wallets SET available_balance = available_balance + $1, updated_at = NOW() WHERE user_email = $2",
+            [netAmount, v.creator_email]
+        );
+
+        // 3. Add Fee to System Account
+        await client.query(
+            "UPDATE wallets SET available_balance = available_balance + $1, updated_at = NOW() WHERE user_email = $2",
             [fee, OWNER_EMAIL]
         );
 
+        // 4. Log the Ledger Movement
         await client.query(`
             INSERT INTO transactions (user_email, voucher_id, transaction_type, amount_usd, fee_usd, status, reference_id) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [v.recipient_email, v.id, 'VOUCHER_RELEASE', v.amount, fee, 'SUCCESSFUL', `REL-${v.id}`]
+            VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, 'SUCCESSFUL', $5)`,
+            [v.creator_email, v.id, netAmount, fee, `REL-${v.id}`]
         );
 
+        // 5. Update Voucher Status
         await client.query("UPDATE vouchers SET status = 'RELEASED', updated_at = NOW() WHERE id = $1", [v.id]);
 
         await client.query('COMMIT');
-        res.json({ success: true, message: "Funds released." });
+        res.json({ success: true, message: "Success! Funds are now available in your wallet." });
 
     } catch (e) {
         await client.query('ROLLBACK');
@@ -189,16 +164,16 @@ router.post('/release', async (req, res) => {
 });
 
 /**
- * 5. DISPUTE
+ * 4. DISPUTE
  */
 router.post('/dispute', async (req, res) => {
-    const { voucherId, userEmail, reason } = req.body;
+    const { voucherId, reason } = req.body;
     try {
         await query(
-            "UPDATE vouchers SET status = 'DISPUTED', dispute_reason = $1, updated_at = NOW() WHERE id = $2",
+            "UPDATE vouchers SET status = 'DISPUTED', updated_at = NOW() WHERE id = $2",
             [reason || "User initiated dispute", voucherId]
         );
-        res.json({ success: true, message: "Funds frozen for dispute." });
+        res.json({ success: true, message: "Funds frozen for dispute review." });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
