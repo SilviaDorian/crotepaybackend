@@ -6,7 +6,43 @@ const router = express.Router();
 const OWNER_EMAIL = 'deepxverified@gmail.com'; // System Revenue Account
 
 /**
- * 1. GET /api/revenue/stats
+ * 1. GET /api/revenue/rates/:currency
+ * Added to resolve Dashboard 404s. 
+ * Provides exchange rates for the frontend to calculate local currency displays.
+ */
+router.get('/rates/:currency', (req, res) => {
+    const { currency } = req.params;
+    
+    // Static rates relative to USD (Base 1.0)
+    // You can later update this to fetch from a live API like ExchangeRate-API
+    const rates = {
+        'NGN': 1550.00,
+        'GBP': 0.79,
+        'EUR': 0.92,
+        'USD': 1.00
+    };
+
+    const targetCurrency = currency.toUpperCase();
+    const rate = rates[targetCurrency];
+
+    if (rate) {
+        res.json({ 
+            success: true, 
+            currency: targetCurrency, 
+            rate: rate 
+        });
+    } else {
+        // Fallback to 1.0 if currency not found to prevent dashboard crashes
+        res.json({ 
+            success: true, 
+            currency: targetCurrency, 
+            rate: 1.0 
+        });
+    }
+});
+
+/**
+ * 2. GET /api/revenue/stats
  * Provides a snapshot of the platform's financial health.
  */
 router.get('/stats', async (req, res) => {
@@ -18,7 +54,6 @@ router.get('/stats', async (req, res) => {
     }
 
     try {
-        // We look for 'ESCROW_RELEASE' as that is when the fee is actually earned
         const stats = await query(
             `SELECT 
                 SUM(fee_usd) as total_revenue,
@@ -27,7 +62,6 @@ router.get('/stats', async (req, res) => {
              WHERE transaction_type = 'ESCROW_RELEASE' AND status = 'SUCCESSFUL'`
         );
 
-        // Fetch the current balance sitting in the owner wallet
         const currentBalance = await query(
             "SELECT available_balance FROM wallets WHERE user_email = $1",
             [OWNER_EMAIL]
@@ -49,8 +83,8 @@ router.get('/stats', async (req, res) => {
 });
 
 /**
- * 2. POST /api/revenue/withdraw
- * Allows you (the admin) to move earned commission from the digital ledger to your bank.
+ * 3. POST /api/revenue/withdraw
+ * Allows admin to move earned commission to bank.
  */
 router.post('/withdraw', async (req, res) => {
     const { email, amount, bankCode, accountNumber, currency } = req.body;
@@ -64,7 +98,6 @@ router.post('/withdraw', async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        // 1. Check current revenue balance
         const walletRes = await client.query(
             "SELECT available_balance FROM wallets WHERE user_email = $1 FOR UPDATE",
             [OWNER_EMAIL]
@@ -78,14 +111,11 @@ router.post('/withdraw', async (req, res) => {
             throw new Error("Insufficient revenue balance.");
         }
 
-        // 2. Deduct from Ledger
         await client.query(
             "UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2",
             [amount, OWNER_EMAIL]
         );
 
-        // 3. Log System Withdrawal Transaction
-        // Format: REV-WD-TIMESTAMP-EMAIL so the webhook knows who to refund if it fails
         const reference = `REV-WD-${Date.now()}-${OWNER_EMAIL}`;
 
         await client.query(`
@@ -95,7 +125,6 @@ router.post('/withdraw', async (req, res) => {
             [OWNER_EMAIL, 'SYSTEM_WITHDRAWAL', amount, 'PENDING', reference]
         );
 
-        // 4. Trigger Real Payout via Flutterwave
         await triggerBankTransfer({
             amount: parseFloat(amount),
             currency: currency || 'NGN',

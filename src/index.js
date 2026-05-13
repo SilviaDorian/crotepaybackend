@@ -13,6 +13,7 @@ import userRoutes from './routes/users.js';
 import voucherRoutes from './routes/vouchers.js';
 import adminRoutes from './routes/admin.js';
 import withdrawRoutes from './routes/withdraw.js';
+import metadataRoutes from './routes/metadata.js';
 
 dotenv.config();
 
@@ -56,6 +57,8 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/withdraw', withdrawRoutes);
 app.use('/api/history', historyRoutes);
 app.use('/api/revenue', revenueRoutes);
+app.use('/api/metadata', metadataRoutes);
+
 
 // --- 3. Status Route ---
 app.get('/', (req, res) => {
