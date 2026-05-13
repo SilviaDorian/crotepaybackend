@@ -7,11 +7,9 @@ const OWNER_EMAIL = 'deepxverified@gmail.com'; // System Revenue Account
 
 /**
  * 1. CREATE VOUCHER (DATABASE ONLY)
- * Following Option 1: We stop calling Flutterwave here to avoid Redirect URL errors.
- * The voucher starts as 'PENDING'.
  */
 router.post('/create', async (req, res) => {
-    const { payer_email, recipient_email, recipient_name, amount, currency, description } = req.body;
+    const { payer_email, recipient_email, recipient_name, amount, currency, description, category } = req.body;
 
     if (!payer_email || !recipient_email || !amount) {
         return res.status(400).json({ error: "Missing required fields." });
@@ -38,20 +36,17 @@ router.post('/create', async (req, res) => {
         expiresAt.setDate(expiresAt.getDate() + 14); // 14-day expiry
 
         // 1. Save Voucher to DB (Status: PENDING)
-        // No external API calls are made here to ensure speed and stability.
         await query(
-            `INSERT INTO vouchers (id, creator_email, recipient_email, recipient_name, amount, currency, status, release_key_hash, expires_at, description) 
-             VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7, $8, $9)`,
-            [voucherId, payer_email, recipient_email, recipient_name, amount, selectedCurrency, hashedKey, expiresAt, description || "FielPay Escrow"]
+            `INSERT INTO vouchers (id, creator_email, recipient_email, recipient_name, amount, currency, status, release_key_hash, expires_at, description, category) 
+             VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7, $8, $9, $10)`,
+            [voucherId, payer_email, recipient_email, recipient_name, amount, selectedCurrency, hashedKey, expiresAt, description || "FielPay Escrow", category || "General"]
         );
 
-        // 2. Return Success
-        // Frontend will build the link: https://fielpay.free.af/payment-link.html?v_id=VC-XXXXXX
         res.status(201).json({ 
             success: true,
             voucher_code: voucherId, 
             releaseKey: rawKey, 
-            message: `Voucher created in ${selectedCurrency}. Share the link to initiate payment.`
+            message: `Voucher created in ${selectedCurrency}.`
         });
 
     } catch (err) {
@@ -61,22 +56,36 @@ router.post('/create', async (req, res) => {
 });
 
 /**
- * 2. GET VOUCHER DETAILS
- * Used by payment-link.html to display details to the recipient.
+ * 2. GET VOUCHER DETAILS (PUBLIC ACCESS)
+ * Uses LEFT JOIN to get creator's full name and country for the recipient/guest to see.
  */
 router.get('/:id', async (req, res) => {
     try {
-        const result = await query("SELECT * FROM vouchers WHERE id = $1", [req.params.id]);
-        if (result.rows.length === 0) return res.status(404).json({ error: "Voucher not found" });
+        const result = await query(
+            `SELECT 
+                v.*, 
+                u.full_name AS creator_name, 
+                u.country AS creator_country
+             FROM vouchers v
+             LEFT JOIN users u ON v.creator_email = u.email
+             WHERE v.id = $1`, 
+            [req.params.id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: "Voucher not found" });
+        }
+
+        // Return the full object including joined user details
         res.json(result.rows[0]);
     } catch (err) {
+        console.error("Fetch Voucher Error:", err.message);
         res.status(500).json({ error: err.message });
     }
 });
 
 /**
  * 3. WEBHOOK: FLUTTERWAVE SUCCESS
- * Moves status from PENDING to LOCKED after payment is confirmed.
  */
 router.post('/webhook/flutterwave', async (req, res) => {
     const signature = req.headers['verif-hash'];
@@ -90,15 +99,17 @@ router.post('/webhook/flutterwave', async (req, res) => {
         const client = await getClient();
         try {
             await client.query('BEGIN');
+            
+            // Extract the voucher ID from the tx_ref (Format used in frontend: FP-VC-ID-TIMESTAMP)
+            const vId = tx_ref.split('-')[2]; 
 
-            const vRes = await client.query("SELECT * FROM vouchers WHERE id = $1 AND status = 'PENDING'", [tx_ref]);
+            const vRes = await client.query("SELECT * FROM vouchers WHERE id = $1 AND status = 'PENDING'", [vId]);
             const v = vRes.rows[0];
 
             if (v) {
-                // Move to LOCKED (Escrow Active)
                 await client.query("UPDATE vouchers SET status = 'LOCKED' WHERE id = $1", [v.id]);
-
-                // Update Recipient's Escrow Balance
+                // Note: We don't update recipient balance here if they are a guest/unregistered. 
+                // The balance logic should handle "where user_email exists".
                 await client.query(
                     "UPDATE wallets SET escrow_balance = escrow_balance + $1 WHERE user_email = $2",
                     [v.amount, v.recipient_email]
@@ -117,7 +128,6 @@ router.post('/webhook/flutterwave', async (req, res) => {
 
 /**
  * 4. RELEASE FUNDS
- * Credits Recipient (93%) and Owner (7%)
  */
 router.post('/release', async (req, res) => {
     const { voucherId, releaseKey, payerEmail } = req.body;
@@ -125,7 +135,6 @@ router.post('/release', async (req, res) => {
 
     try {
         await client.query('BEGIN');
-
         const vResult = await client.query("SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", [voucherId]);
         const v = vResult.rows[0];
 
@@ -143,7 +152,6 @@ router.post('/release', async (req, res) => {
         const fee = parseFloat((v.amount * 0.07).toFixed(4));
         const netAmount = parseFloat(v.amount) - fee;
 
-        // 1. Update Recipient: Clear Escrow, add Net to Available
         await client.query(`
             UPDATE wallets SET 
                 escrow_balance = escrow_balance - $1,
@@ -153,7 +161,6 @@ router.post('/release', async (req, res) => {
             [v.amount, netAmount, v.recipient_email]
         );
 
-        // 2. Credit Owner Revenue Account (7%)
         await client.query(`
             UPDATE wallets SET 
                 available_balance = available_balance + $1,
@@ -162,19 +169,16 @@ router.post('/release', async (req, res) => {
             [fee, OWNER_EMAIL]
         );
 
-        // 3. Log Transaction
         await client.query(`
-            INSERT INTO transactions (
-                user_email, voucher_id, transaction_type, amount_usd, fee_usd, status, reference_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            INSERT INTO transactions (user_email, voucher_id, transaction_type, amount_usd, fee_usd, status, reference_id) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
             [v.recipient_email, v.id, 'VOUCHER_RELEASE', v.amount, fee, 'SUCCESSFUL', `REL-${v.id}`]
         );
 
-        // 4. Mark Voucher as RELEASED
         await client.query("UPDATE vouchers SET status = 'RELEASED', updated_at = NOW() WHERE id = $1", [v.id]);
 
         await client.query('COMMIT');
-        res.json({ success: true, message: "Funds released.", data: { net: netAmount, fee: fee } });
+        res.json({ success: true, message: "Funds released." });
 
     } catch (e) {
         await client.query('ROLLBACK');
@@ -190,13 +194,6 @@ router.post('/release', async (req, res) => {
 router.post('/dispute', async (req, res) => {
     const { voucherId, userEmail, reason } = req.body;
     try {
-        const result = await query(
-            "SELECT * FROM vouchers WHERE id = $1 AND (creator_email = $2 OR recipient_email = $2)",
-            [voucherId, userEmail]
-        );
-        const v = result.rows[0];
-        if (!v || v.status !== 'LOCKED') return res.status(400).json({ error: "Cannot dispute this voucher." });
-
         await query(
             "UPDATE vouchers SET status = 'DISPUTED', dispute_reason = $1, updated_at = NOW() WHERE id = $2",
             [reason || "User initiated dispute", voucherId]
