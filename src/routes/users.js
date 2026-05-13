@@ -111,20 +111,20 @@ router.post('/request-phone-otp', async (req, res) => {
             "INSERT INTO verification_codes (email, code, expires_at) VALUES ($1, $2, NOW() + INTERVAL '10 minutes')", 
             [userEmail, otp]
         );
+        
+        // Save the phone number to the user profile
         await query("UPDATE users SET phone_number = $1 WHERE email = $2", [phone_number, userEmail]);
 
-        // IMPORTANT: We send the 'otp' back to the frontend so it can open WhatsApp
+        // SUCCESS: Send the code back so the frontend can build the WhatsApp link
         res.json({ 
             success: true, 
-            message: "Code generated.", 
             code: otp 
         });
     } catch (err) {
         console.error("OTP Error:", err.message);
         res.status(500).json({ error: "Database error." });
     }
-});
-/**
+});/**
  * 4. TIER 2: VERIFY OTP (Upgrade to Tier 2)
  */
 router.post('/verify-phone-otp', async (req, res) => {
