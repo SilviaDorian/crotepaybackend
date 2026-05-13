@@ -100,44 +100,30 @@ router.post('/login', async (req, res) => {
  */
 router.post('/request-phone-otp', async (req, res) => {
     const { email, phone_number } = req.body;
-    
-    if (!email || !phone_number) {
-        return res.status(400).json({ error: "Email and Phone required." });
-    }
+    if (!email || !phone_number) return res.status(400).json({ error: "Email and Phone required." });
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
     try {
-        // Log start for debugging
-        console.log(`[OTP] Processing request for ${email}`);
-
-        // Ensure clean inputs
         const userEmail = email.toLowerCase().trim();
-
-        // Transactional update to ensure codes are saved
         await query("DELETE FROM verification_codes WHERE email = $1", [userEmail]); 
-        
-        // This is the common failure point if table 'verification_codes' is missing
         await query(
             "INSERT INTO verification_codes (email, code, expires_at) VALUES ($1, $2, NOW() + INTERVAL '10 minutes')", 
             [userEmail, otp]
         );
-        
         await query("UPDATE users SET phone_number = $1 WHERE email = $2", [phone_number, userEmail]);
 
-        console.log(`\n[SMS GATEWAY SIMULATION]\nTo: ${phone_number}\nCode: ${otp}\n`);
-
-        res.json({ success: true, message: "Verification code sent." });
-    } catch (err) {
-        // Detailed log to Vercel/Server console
-        console.error("CRITICAL OTP ERROR:", err.message);
-        res.status(500).json({ 
-            error: "Failed to process OTP request.",
-            details: err.message // Helps identify missing tables
+        // IMPORTANT: We send the 'otp' back to the frontend so it can open WhatsApp
+        res.json({ 
+            success: true, 
+            message: "Code generated.", 
+            code: otp 
         });
+    } catch (err) {
+        console.error("OTP Error:", err.message);
+        res.status(500).json({ error: "Database error." });
     }
 });
-
 /**
  * 4. TIER 2: VERIFY OTP (Upgrade to Tier 2)
  */
