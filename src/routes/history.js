@@ -5,7 +5,7 @@ const router = express.Router();
 
 /**
  * 1. GET /api/history/wallet-stats
- * Fixes Dashboard 404: Fetches balance, total inflow, and outflow.
+ * Optimized to correctly identify money coming in vs. going out
  */
 router.get('/wallet-stats', async (req, res) => {
     const { email } = req.query;
@@ -13,10 +13,19 @@ router.get('/wallet-stats', async (req, res) => {
     if (!email) return res.status(400).json({ error: "Email is required" });
 
     try {
+        // Logic: 
+        // Inflow = ESCROW_RELEASE (Creator getting paid) or REVERSED (Withdrawal failed)
+        // Outflow = WITHDRAWAL (Successful bank transfer)
         const stats = await query(
             `SELECT 
-                COALESCE(SUM(CASE WHEN amount_usd > 0 AND status = 'SUCCESSFUL' THEN amount_usd ELSE 0 END), 0) as total_in,
-                COALESCE(SUM(CASE WHEN amount_usd < 0 AND status = 'SUCCESSFUL' THEN ABS(amount_usd) ELSE 0 END), 0) as total_out
+                COALESCE(SUM(CASE 
+                    WHEN transaction_type IN ('ESCROW_RELEASE', 'REVERSED') 
+                    AND status = 'SUCCESSFUL'::voucher_status THEN amount_usd 
+                    ELSE 0 END), 0) as total_in,
+                COALESCE(SUM(CASE 
+                    WHEN transaction_type = 'WITHDRAWAL' 
+                    AND status = 'SUCCESSFUL'::voucher_status THEN amount_usd 
+                    ELSE 0 END), 0) as total_out
              FROM transactions WHERE user_email = $1`,
             [email]
         );
@@ -41,7 +50,6 @@ router.get('/wallet-stats', async (req, res) => {
 
 /**
  * 2. GET /api/history/summary
- * Specifically used by the History HTML page for top cards.
  */
 router.get('/summary', async (req, res) => {
     const { email } = req.query;
@@ -61,7 +69,7 @@ router.get('/summary', async (req, res) => {
 
 /**
  * 3. GET /api/history/transactions
- * Fetches the full list for the history table.
+ * Uses explicit ENUM casting for stability
  */
 router.get('/transactions', async (req, res) => {
     const { email } = req.query;

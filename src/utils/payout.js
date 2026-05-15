@@ -1,47 +1,48 @@
 import axios from 'axios';
 
 /**
- * Internal helper to fetch live exchange rates.
- */
-const getExchangeRate = async (targetCurrency) => {
-    try {
-        const apiKey = process.env.EXCHANGERATE_API_KEY;
-        const response = await axios.get(`https://v6.exchangerate-api.com/v6/${apiKey}/pair/USD/${targetCurrency}`);
-        
-        if (response.data && response.data.conversion_rate) {
-            return response.data.conversion_rate;
-        }
-        throw new Error("Invalid response from Exchange Rate API");
-    } catch (error) {
-        console.error("Rate Fetch Error:", error.message);
-        throw new Error("Unable to fetch current exchange rates.");
-    }
-};
-
-/**
- * Triggers the actual bank payout via Flutterwave.
+ * Triggers the bank payout via Flutterwave.
+ * Handles both "Same-Currency" transfers and "Cross-Currency" conversions.
  */
 export const triggerBankTransfer = async (details) => {
-    const { amount, currency, bankCode, accountNumber, reference } = details;
+    const { amount, sourceCurrency, targetCurrency, bankCode, accountNumber, reference } = details;
 
     try {
-        const liveRate = await getExchangeRate(currency);
-        const safetyBuffer = 0.995; 
-        const appliedRate = liveRate * safetyBuffer;
-        const localAmount = Math.floor(amount * appliedRate);
+        let finalPayoutAmount = amount;
+        let appliedRate = 1.0;
 
-        console.log(`[PAYOUT] Converting $${amount} USD to ${localAmount} ${currency}`);
+        // --- 1. SMART ROUTING: Only convert if source and target differ ---
+        if (sourceCurrency !== targetCurrency) {
+            console.log(`[PAYOUT] FX detected: Converting ${amount} ${sourceCurrency} to ${targetCurrency}`);
+            
+            // Fetch the official rate from Flutterwave to ensure zero-loss for the merchant
+            const rateUrl = `https://api.flutterwave.com/v3/transfers/rates?amount=${amount}&destination_currency=${targetCurrency}&source_currency=${sourceCurrency}`;
+            
+            const rateResponse = await axios.get(rateUrl, {
+                headers: { Authorization: `Bearer ${process.env.FLW_SECRET_KEY}` }
+            });
 
+            if (rateResponse.data && rateResponse.data.data) {
+                finalPayoutAmount = rateResponse.data.data.destination_amount;
+                appliedRate = rateResponse.data.data.rate;
+            } else {
+                throw new Error("Could not fetch internal FX rate from Flutterwave.");
+            }
+        } else {
+            console.log(`[PAYOUT] Native Lane: Sending ${amount} ${targetCurrency} directly.`);
+        }
+
+        // --- 2. EXECUTE TRANSFER ---
         const response = await axios.post(
             'https://api.flutterwave.com/v3/transfers',
             {
                 account_bank: bankCode,
                 account_number: accountNumber,
-                amount: localAmount,
-                currency: currency,
+                amount: finalPayoutAmount, // The amount in the local currency
+                currency: targetCurrency,   // e.g., 'NGN', 'USD', 'GHS'
                 reference: reference,
-                callback_url: `${process.env.BASE_URL}/api/webhooks/flutterwave`,
-                debit_currency: "USD"
+                debit_currency: sourceCurrency, // The currency to deduct from your FLW balance
+                callback_url: `${process.env.BASE_URL}/api/webhooks/flutterwave`
             },
             {
                 headers: { 
@@ -51,19 +52,21 @@ export const triggerBankTransfer = async (details) => {
             }
         );
 
+        // --- 3. RETURN DATA ---
         return {
-            ...response.data,
+            success: true,
+            flw_id: response.data.data.id,
             applied_rate: appliedRate,
-            local_amount: localAmount,
-            usd_amount: amount
+            local_amount: finalPayoutAmount,
+            source_amount: amount,
+            source_currency: sourceCurrency
         };
 
     } catch (error) {
         const flwError = error.response?.data?.message || error.message;
-        console.error("Transfer Execution Error:", flwError);
+        console.error("❌ Transfer Execution Error:", flwError);
         throw new Error(`Payout failed: ${flwError}`);
     }
 };
 
-// ADD THIS AT THE VERY BOTTOM TO FIX THE IMPORT ERROR
 export default { triggerBankTransfer };

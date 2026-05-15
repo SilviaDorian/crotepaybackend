@@ -17,38 +17,35 @@ import withdrawRoutes from './routes/withdraw.js';
 dotenv.config();
 
 const app = express();
-
 const OWNER_EMAIL = 'deepxverified@gmail.com';
 
-// --- 1. Middleware ---
-
-/** * HELMET UPDATE: 
- * Standard helmet settings can block cross-origin resource sharing.
- * We configure it to allow your frontend to interact with the API.
- */
+// --- 1. Security & Logging Middleware ---
 app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" }
 })); 
 
-/**
- * CORS UPDATE: 
- * We explicitly whitelist your InfinityFree subdomain.
- * This prevents the "Server connection failed" error in the browser.
- */
 app.use(cors({
     origin: [
         'https://fielpay.free.nf', 
-        'http://fielpay.free.nf'
+        'http://fielpay.free.nf',
+        'http://localhost:3000' // Added for your local testing
     ],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'verif-hash'], // Added verif-hash for webhooks
     credentials: true
 }));
 
-app.use(express.json());
 app.use(morgan('dev')); 
 
 // --- 2. Routes ---
+
+/**
+ * NOTE: If you ever implement Stripe or high-security FLW checks, 
+ * put the webhook route BEFORE express.json() if you need the raw body.
+ * For now, standard express.json() should work with FLW's verif-hash.
+ */
+app.use(express.json());
+
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/vouchers', voucherRoutes);
@@ -62,22 +59,23 @@ app.use('/api/revenue', revenueRoutes);
 app.get('/', (req, res) => {
     res.json({ 
         status: "Online", 
-        project: "CrotePay Escrow Engine",
+        project: "FielPay Escrow Engine",
         environment: process.env.NODE_ENV || "development",
-        version: "1.4.3",
+        version: "1.5.0",
         owner_account: OWNER_EMAIL
     });
 });
 
-// --- 4. Cron Logic (Refactored for Serverless) ---
+// --- 4. Cron Logic (Sync with ENUMs) ---
 app.get('/api/cron/cleanup', async (req, res) => {
     console.log("CRON: Auto-disputing expired vouchers...");
     try {
+        // Updated to use the ::voucher_status cast and the correct column name
         await query(`
             UPDATE vouchers 
-            SET status = 'DISPUTED', 
-                dispute_reason = 'Auto-dispute: Window expired'
-            WHERE status = 'LOCKED' AND expires_at <= NOW()
+            SET status = 'DISPUTED'::voucher_status, 
+                description = CONCAT(description, ' | Auto-dispute: Window expired')
+            WHERE status = 'LOCKED'::voucher_status AND expires_at <= NOW()
         `);
         res.status(200).send("Cleanup successful");
     } catch (err) {
@@ -86,7 +84,7 @@ app.get('/api/cron/cleanup', async (req, res) => {
     }
 });
 
-// --- 5. Server Start (Conditional) ---
+// --- 5. Server Start ---
 if (process.env.NODE_ENV !== 'production') {
     const PORT = process.env.PORT || 4000;
     app.listen(PORT, '0.0.0.0', () => {
@@ -94,5 +92,4 @@ if (process.env.NODE_ENV !== 'production') {
     });
 }
 
-// --- 6. Vercel Export ---
 export default app;

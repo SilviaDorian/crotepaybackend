@@ -3,18 +3,16 @@ import { query, getClient } from '../db/index.js';
 import { triggerBankTransfer } from '../utils/payout.js';
 
 const router = express.Router();
-const OWNER_EMAIL = 'deepxverified@gmail.com'; // System Revenue Account
+const OWNER_EMAIL = 'deepxverified@gmail.com'; 
 
 /**
  * 1. GET /api/revenue/rates/:currency
- * Added to resolve Dashboard 404s. 
- * Provides exchange rates for the frontend to calculate local currency displays.
+ * Provides exchange rates for frontend calculations.
  */
-router.get('/rates/:currency', (req, res) => {
+router.get('/rates/:currency', async (req, res) => {
     const { currency } = req.params;
     
-    // Static rates relative to USD (Base 1.0)
-    // You can later update this to fetch from a live API like ExchangeRate-API
+    // Default fallback rates
     const rates = {
         'NGN': 1550.00,
         'GBP': 0.79,
@@ -23,43 +21,34 @@ router.get('/rates/:currency', (req, res) => {
     };
 
     const targetCurrency = currency.toUpperCase();
-    const rate = rates[targetCurrency];
+    const rate = rates[targetCurrency] || 1.0;
 
-    if (rate) {
-        res.json({ 
-            success: true, 
-            currency: targetCurrency, 
-            rate: rate 
-        });
-    } else {
-        // Fallback to 1.0 if currency not found to prevent dashboard crashes
-        res.json({ 
-            success: true, 
-            currency: targetCurrency, 
-            rate: 1.0 
-        });
-    }
+    res.json({ 
+        success: true, 
+        currency: targetCurrency, 
+        rate: rate 
+    });
 });
 
 /**
  * 2. GET /api/revenue/stats
- * Provides a snapshot of the platform's financial health.
+ * Dashboard data for the Admin (OWNER_EMAIL).
  */
 router.get('/stats', async (req, res) => {
     const { email } = req.query;
 
-    // Strict Admin-Only Access
     if (email !== OWNER_EMAIL) {
         return res.status(403).json({ error: "Access denied. Admin credentials required." });
     }
 
     try {
+        // Updated to sum fees from both Escrow Releases and Withdrawals
         const stats = await query(
             `SELECT 
                 SUM(fee_usd) as total_revenue,
                 COUNT(*) as total_transactions
              FROM transactions 
-             WHERE transaction_type = 'ESCROW_RELEASE' AND status = 'SUCCESSFUL'`
+             WHERE status = 'SUCCESSFUL'::voucher_status`
         );
 
         const currentBalance = await query(
@@ -84,7 +73,7 @@ router.get('/stats', async (req, res) => {
 
 /**
  * 3. POST /api/revenue/withdraw
- * Allows admin to move earned commission to bank.
+ * Moves Admin commission to bank.
  */
 router.post('/withdraw', async (req, res) => {
     const { email, amount, bankCode, accountNumber, currency } = req.body;
@@ -106,27 +95,32 @@ router.post('/withdraw', async (req, res) => {
         if (walletRes.rows.length === 0) throw new Error("Revenue wallet not found.");
         
         const balance = parseFloat(walletRes.rows[0].available_balance);
+        const withdrawalAmount = parseFloat(amount);
 
-        if (balance < parseFloat(amount)) {
+        if (balance < withdrawalAmount) {
             throw new Error("Insufficient revenue balance.");
         }
 
+        // 1. Deduct from Admin Wallet
         await client.query(
             "UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2",
-            [amount, OWNER_EMAIL]
+            [withdrawalAmount, OWNER_EMAIL]
         );
 
-        const reference = `REV-WD-${Date.now()}-${OWNER_EMAIL}`;
+        // 2. Generate Reference (Sanitized)
+        const reference = `REV-WD-${Date.now()}-${OWNER_EMAIL.replace('@', '_at_')}`;
 
+        // 3. Log Transaction
         await client.query(`
             INSERT INTO transactions (
                 user_email, transaction_type, amount_usd, status, reference_id
-            ) VALUES ($1, $2, $3, $4, $5)`,
-            [OWNER_EMAIL, 'SYSTEM_WITHDRAWAL', amount, 'PENDING', reference]
+            ) VALUES ($1, $2, $3, 'PROCESSING'::voucher_status, $4)`,
+            [OWNER_EMAIL, 'SYSTEM_WITHDRAWAL', withdrawalAmount, reference]
         );
 
+        // 4. Trigger Payout
         await triggerBankTransfer({
-            amount: parseFloat(amount),
+            amount: withdrawalAmount,
             currency: currency || 'NGN',
             bankCode,
             accountNumber,
