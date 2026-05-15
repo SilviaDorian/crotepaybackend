@@ -1,18 +1,12 @@
 import express from 'express';
 import axios from 'axios';
-import { query, getClient } from '../db/index.js';
+import { getClient } from '../db/index.js';
 import { triggerBankTransfer } from '../utils/payout.js';
 
 const router = express.Router();
 
-const OWNER_EMAIL = 'deepxverified@gmail.com';
 const BYPASS_EMAILS = ['deepxverified@gmail.com', 'mitounamadike@gmail.com', 'tester@fielpay.com'];
-const SERVICE_FEE_PERCENT = 0.07; // 7% System Fee
-
-const MIN_LIMITS = {
-    'NGN': 5000, 'USD': 50, 'EUR': 50, 'GBP': 50,
-    'KES': 500, 'GHS': 50, 'ZAR': 100, 'UGX': 15000, 'RWF': 10000
-};
+const SERVICE_FEE_PERCENT = 0.07; 
 
 /**
  * 1. GET BANKS BY COUNTRY
@@ -48,9 +42,6 @@ router.post('/verify-account', async (req, res) => {
 /**
  * 3. REQUEST WITHDRAWAL
  */
-/**
- * 3. REQUEST WITHDRAWAL
- */
 router.post('/request', async (req, res) => {
     const { email, amount, bankCode, accountNumber, currency } = req.body;
     const targetCurrency = currency || 'NGN';
@@ -65,7 +56,7 @@ router.post('/request', async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        // 1. Fetch user and wallet
+        // Fetch user and wallet with a LOCK to prevent race conditions
         const userRes = await client.query(
             `SELECT u.email, u.kyc_tier, w.available_balance, w.daily_withdraw_limit, w.currency as wallet_currency
              FROM users u 
@@ -80,28 +71,26 @@ router.post('/request', async (req, res) => {
         const requestedAmount = parseFloat(amount);
         const sourceCurrency = user.wallet_currency || 'USD';
 
-        // 2. Validation
+        // Validation Logic
         if (!isTester) {
             if (user.kyc_tier < 2) throw new Error("KYC Tier 2 required for withdrawals.");
             if (requestedAmount > parseFloat(user.daily_withdraw_limit)) throw new Error("Daily limit exceeded.");
             if (parseFloat(user.available_balance) < requestedAmount) throw new Error("Insufficient balance.");
         }
 
-        // 3. Fee Calculation (7% system revenue)
         const serviceFee = requestedAmount * SERVICE_FEE_PERCENT;
         const netAmount = requestedAmount - serviceFee;
 
-        // 4. Reference Generation 
-        // IMPORTANT: We append the email so the Webhook can refund the right person if needed
+        // Reference format: WD-Timestamp-Email (Webhook uses this to map the refund)
         const flwRef = `WD-${Date.now()}-${email.replace('@', '_at_')}`;
         
-        // 5. Deduct GROSS amount from user immediately (Prevent double spending)
+        // Step A: Deduct funds internally BEFORE calling external API
         await client.query(
             "UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
             [requestedAmount, email, sourceCurrency]
         );
 
-        // 6. PAYOUT EXECUTION (Calling Flutterwave)
+        // Step B: Call Flutterwave Utility
         const flwResponse = await triggerBankTransfer({
             amount: netAmount,
             sourceCurrency: sourceCurrency, 
@@ -111,25 +100,13 @@ router.post('/request', async (req, res) => {
             reference: flwRef
         });
 
-        // 7. RECORD PENDING TRANSACTION
-        // We set status to 'PROCESSING'. The Webhook will flip this to SUCCESSFUL or FAILED.
+        // Step C: Record the "Processing" transaction
         await client.query(`
             INSERT INTO transactions (
-                user_email, 
-                transaction_type, 
-                amount_usd, 
-                fee_usd, 
-                status, 
-                reference_id, 
-                currency,
-                metadata
+                user_email, transaction_type, amount_usd, fee_usd, status, reference_id, currency, metadata
             ) VALUES ($1, 'WITHDRAWAL', $2, $3, 'PROCESSING'::voucher_status, $4, $5, $6)`,
             [
-                email, 
-                requestedAmount, 
-                serviceFee, 
-                flwRef,
-                sourceCurrency,
+                email, requestedAmount, serviceFee, flwRef, sourceCurrency,
                 JSON.stringify({
                     target_currency: targetCurrency,
                     target_amount: flwResponse.local_amount,
@@ -143,7 +120,7 @@ router.post('/request', async (req, res) => {
 
         res.json({ 
             success: true, 
-            message: "Withdrawal initiated. Your balance has been updated.", 
+            message: "Withdrawal initiated.", 
             details: {
                 sent: `${flwResponse.local_amount} ${targetCurrency}`,
                 rate: flwResponse.applied_rate
@@ -152,10 +129,10 @@ router.post('/request', async (req, res) => {
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
-        console.error("Withdrawal Error:", err.message);
         res.status(400).json({ error: err.message });
     } finally {
         if (client) client.release();
     }
 });
+
 export default router;

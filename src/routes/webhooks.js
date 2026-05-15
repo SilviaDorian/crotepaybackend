@@ -3,10 +3,15 @@ import { getClient } from '../db/index.js';
 
 const router = express.Router();
 
+/**
+ * FLUTTERWAVE WEBHOOK HANDLER
+ * Endpoint: /api/webhooks/flutterwave
+ */
 router.post('/flutterwave', async (req, res) => {
     const secretHash = process.env.FLW_SECRET_HASH;
     const signature = req.headers['verif-hash'];
 
+    // 1. Verify the authenticity of the webhook
     if (!signature || signature !== secretHash) {
         return res.status(401).end(); 
     }
@@ -24,11 +29,12 @@ router.post('/flutterwave', async (req, res) => {
          * Action: Increment user's ESCROW_BALANCE.
          */
         if (payload.event === 'charge.completed') {
-            const voucherId = payload.data.tx_ref; // Ensure this is just the Voucher ID or parsed correctly
+            const voucherId = payload.data.tx_ref; 
             const flwStatus = payload.data.status.toUpperCase(); 
             const amountPaid = payload.data.amount;
             const currency = payload.data.currency;
             
+            // Lock the voucher row for update to prevent concurrent race conditions
             const result = await client.query(
                 "SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", 
                 [voucherId]
@@ -44,7 +50,7 @@ router.post('/flutterwave', async (req, res) => {
                     [targetStatus, voucherId]
                 );
 
-                // Only increment ledger if it's a new successful payment
+                // Only update ledger if it's a new successful payment for a PENDING voucher
                 if (flwStatus === 'SUCCESSFUL' && v.status === 'PENDING') {
                     // Update Internal Wallet: Increase Escrow
                     await client.query(`
@@ -57,6 +63,7 @@ router.post('/flutterwave', async (req, res) => {
                         [v.creator_email, amountPaid, currency]
                     );
 
+                    // Log the Escrow Deposit Transaction
                     await client.query(`
                         INSERT INTO transactions (
                             user_email, voucher_id, transaction_type, amount_usd, status, reference_id, currency
@@ -73,10 +80,10 @@ router.post('/flutterwave', async (req, res) => {
          * Action: Finalize deduction or REVERSE if bank transfer fails.
          */
         if (payload.event === 'transfer.completed') {
-            const { reference, status, amount, currency, fee } = payload.data;
+            const { reference, status, amount, currency } = payload.data;
             const finalStatus = status.toUpperCase(); 
 
-            // Find the original internal transaction
+            // Find the original internal transaction created by withdraw.js
             const txResult = await client.query(
                 "SELECT * FROM transactions WHERE reference_id = $1",
                 [reference]
@@ -84,19 +91,17 @@ router.post('/flutterwave', async (req, res) => {
             const originalTx = txResult.rows[0];
 
             if (originalTx) {
-                // 1. Update the original transaction status
+                // 1. Update the original transaction status (flipping from PROCESSING to result)
                 await client.query(
                     "UPDATE transactions SET status = $1::voucher_status, updated_at = NOW() WHERE reference_id = $2",
                     [finalStatus, reference]
                 );
 
                 if (finalStatus === 'SUCCESSFUL') {
-                    // Funds physically left FLW Merchant account. 
-                    // Internal deduction already happened during withdrawal request.
                     console.log(`✅ Withdrawal Settled: ${amount} ${currency} for ${originalTx.user_email}`);
                 } 
                 else if (finalStatus === 'FAILED' || finalStatus === 'REJECTED') {
-                    // Physical funds NEVER left FLW. We must REFUND the available balance.
+                    // Transfer failed at the bank level. Refund the user's available balance.
                     await client.query(`
                         UPDATE wallets SET 
                             available_balance = available_balance + $1,
@@ -105,7 +110,7 @@ router.post('/flutterwave', async (req, res) => {
                         [parseFloat(amount), originalTx.user_email, currency]
                     );
 
-                    // Log the reversal so the user knows why their balance went back up
+                    // Log the reversal for the user's history
                     await client.query(`
                         INSERT INTO transactions (
                             user_email, transaction_type, amount_usd, status, reference_id, currency
@@ -119,11 +124,13 @@ router.post('/flutterwave', async (req, res) => {
         }
 
         await client.query('COMMIT');
+        // Flutterwave requires a 200 OK response to stop retrying the webhook
         res.status(200).send('Webhook Processed');
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
         console.error("⚠️ Webhook Error:", err.message);
+        // We still send 200 so Flutterwave doesn't bombard the server if it's a logic error
         res.status(200).send('Error Handled'); 
     } finally {
         if (client) client.release();
