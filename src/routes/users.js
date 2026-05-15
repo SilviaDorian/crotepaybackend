@@ -16,48 +16,37 @@ router.post('/register', async (req, res) => {
     const { email, password, full_name, country_name, country_code, currency } = req.body;
     const client = await getClient();
 
-    if (!email || !password || !currency || !country_code) {
-        return res.status(400).json({ error: "Required: Email, Password, Currency, and Country Code." });
-    }
-
     try {
         await client.query('BEGIN');
 
         const hashedPassword = await bcrypt.hash(password, 10);
-        const selectedCurrency = currency.toUpperCase();
-        const isoCode = country_code.toUpperCase().substring(0, 2);
         const userEmail = email.toLowerCase().trim();
 
-        // 1. Create User (Tier 1)
-        // This INSERT will now fire the 'on_fielpay_signup' trigger in Supabase!
+        // 1. Create User ONLY
+        // The Supabase trigger 'on_fielpay_signup' will catch this and 
+        // automatically create the 4 wallets (USD, GBP, EUR, Local).
         await client.query(
             `INSERT INTO users (
                 email, password_hash, full_name, 
                 country_name, country_code, preferred_currency, kyc_tier
             ) VALUES ($1, $2, $3, $4, $5, $6, 1)`,
-            [userEmail, hashedPassword, full_name, country_name, isoCode, selectedCurrency]
+            [userEmail, hashedPassword, full_name, country_name, country_code, currency.toUpperCase()]
         );
 
-        /* NOTE: We REMOVED the manual wallet INSERT from here.
-           The Supabase Trigger 'on_fielpay_signup' now creates 
-           the 4 wallets automatically when the user is inserted above.
-        */
+        // --- IMPORTANT: REMOVE THE 'INSERT INTO wallets' BLOCK FROM HERE ---
+        // If you leave it here, it clashes with the database trigger.
 
         await client.query('COMMIT');
-        res.status(201).json({ 
-            success: true, 
-            message: "Account created (Tier 1). Wallets initialized." 
-        });
+        res.status(201).json({ success: true, message: "Account created!" });
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
         console.error("Registration Error:", err.message);
-        res.status(400).json({ error: "Registration failed. Email may be in use." });
+        res.status(400).json({ error: "Registration failed." });
     } finally {
         client.release();
     }
-});
-/**
+});/**
  * 2. LOGIN
  */
 router.post('/login', async (req, res) => {
