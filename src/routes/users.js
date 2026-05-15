@@ -9,6 +9,9 @@ const router = express.Router();
  * 1. REGISTER (Starts at Tier 1)
  * Wallet Limit: $500 | Withdrawal Limit: $0
  */
+/**
+ * 1. REGISTER (Starts at Tier 1)
+ */
 router.post('/register', async (req, res) => {
     const { email, password, full_name, country_name, country_code, currency } = req.body;
     const client = await getClient();
@@ -23,38 +26,37 @@ router.post('/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const selectedCurrency = currency.toUpperCase();
         const isoCode = country_code.toUpperCase().substring(0, 2);
+        const userEmail = email.toLowerCase().trim();
 
         // 1. Create User (Tier 1)
+        // This INSERT will now fire the 'on_fielpay_signup' trigger in Supabase!
         await client.query(
             `INSERT INTO users (
                 email, password_hash, full_name, 
                 country_name, country_code, preferred_currency, kyc_tier
             ) VALUES ($1, $2, $3, $4, $5, $6, 1)`,
-            [email.toLowerCase().trim(), hashedPassword, full_name, country_name, isoCode, selectedCurrency]
+            [userEmail, hashedPassword, full_name, country_name, isoCode, selectedCurrency]
         );
 
-        // 2. Initialize Ledger Wallet with Tier 1 Limits
-        await client.query(
-            `INSERT INTO wallets (user_email, currency, max_balance_limit, daily_withdraw_limit) 
-             VALUES ($1, $2, 500.00, 0.00)`,
-            [email.toLowerCase().trim(), selectedCurrency]
-        );
+        /* NOTE: We REMOVED the manual wallet INSERT from here.
+           The Supabase Trigger 'on_fielpay_signup' now creates 
+           the 4 wallets automatically when the user is inserted above.
+        */
 
         await client.query('COMMIT');
         res.status(201).json({ 
             success: true, 
-            message: "Account created (Tier 1). Verify phone to enable withdrawals." 
+            message: "Account created (Tier 1). Wallets initialized." 
         });
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
         console.error("Registration Error:", err.message);
-        res.status(400).json({ error: "Registration failed. This email is likely already in use." });
+        res.status(400).json({ error: "Registration failed. Email may be in use." });
     } finally {
         client.release();
     }
 });
-
 /**
  * 2. LOGIN
  */
