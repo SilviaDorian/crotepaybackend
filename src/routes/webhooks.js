@@ -19,13 +19,16 @@ router.post('/flutterwave', async (req, res) => {
         await client.query('BEGIN');
 
         /**
-         * SCENARIO A: DEPOSIT (Payer pays for the Voucher)
+         * SCENARIO A: DEPOSIT (User pays for the Voucher)
+         * Funds enter your FLW Merchant Account.
+         * Action: Increment user's ESCROW_BALANCE.
          */
         if (payload.event === 'charge.completed') {
-            const voucherId = payload.data.tx_ref;
+            const voucherId = payload.data.tx_ref; // Ensure this is just the Voucher ID or parsed correctly
             const flwStatus = payload.data.status.toUpperCase(); 
+            const amountPaid = payload.data.amount;
+            const currency = payload.data.currency;
             
-            // 1. Fetch voucher & lock row
             const result = await client.query(
                 "SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", 
                 [voucherId]
@@ -33,19 +36,17 @@ router.post('/flutterwave', async (req, res) => {
             const v = result.rows[0];
 
             if (v) {
-                // Determine new status based on Flutterwave feedback
                 const targetStatus = (flwStatus === 'SUCCESSFUL') ? 'LOCKED' : 'FAILED';
 
-                // 2. ALWAYS update the voucher status so the UI/Receipt can stop "Syncing"
+                // Update Voucher Status
                 await client.query(
                     "UPDATE vouchers SET status = $1::voucher_status, updated_at = NOW() WHERE id = $2",
                     [targetStatus, voucherId]
                 );
 
-                // 3. ONLY update ledger if status is SUCCESSFUL and it was previously PENDING
+                // Only increment ledger if it's a new successful payment
                 if (flwStatus === 'SUCCESSFUL' && v.status === 'PENDING') {
-                    
-                    // Update CREATOR's Escrow Balance (Internal Ledger Mirror)
+                    // Update Internal Wallet: Increase Escrow
                     await client.query(`
                         INSERT INTO wallets (user_email, escrow_balance, available_balance, currency) 
                         VALUES ($1, $2, 0, $3)
@@ -53,56 +54,67 @@ router.post('/flutterwave', async (req, res) => {
                         DO UPDATE SET 
                             escrow_balance = wallets.escrow_balance + $2,
                             updated_at = NOW()`,
-                        [v.creator_email, v.amount, v.currency]
+                        [v.creator_email, amountPaid, currency]
                     );
 
-                    // Log Audit Transaction for the Creator
                     await client.query(`
                         INSERT INTO transactions (
                             user_email, voucher_id, transaction_type, amount_usd, status, reference_id, currency
                         ) VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, 'SUCCESSFUL'::voucher_status, $4, $5)`,
-                        [v.creator_email, v.id, v.amount, `FLW-${payload.data.id}`, v.currency]
+                        [v.creator_email, v.id, amountPaid, `FLW-CHG-${payload.data.id}`, currency]
                     );
-                    
-                    console.log(`✅ Ledger Updated: ${v.amount} ${v.currency} credited to ${v.creator_email} (Escrow)`);
-                } else if (flwStatus !== 'SUCCESSFUL') {
-                    console.log(`❌ Payment Failed for Voucher: ${voucherId}. Status updated to FAILED.`);
                 }
-            } else {
-                console.error(`⚠️ Webhook received for unknown Voucher ID: ${voucherId}`);
             }
         }
 
         /**
-         * SCENARIO B: WITHDRAWAL / TRANSFER
+         * SCENARIO B: WITHDRAWAL (Flutterwave Transfer API)
+         * Funds leave your FLW Merchant Account to user's bank.
+         * Action: Finalize deduction or REVERSE if bank transfer fails.
          */
         if (payload.event === 'transfer.completed') {
-            const { reference, status, amount, currency } = payload.data;
+            const { reference, status, amount, currency, fee } = payload.data;
             const finalStatus = status.toUpperCase(); 
-            
-            await client.query(
-                "UPDATE transactions SET status = $1::voucher_status, updated_at = NOW() WHERE reference_id = $2",
-                [finalStatus, reference]
+
+            // Find the original internal transaction
+            const txResult = await client.query(
+                "SELECT * FROM transactions WHERE reference_id = $1",
+                [reference]
             );
+            const originalTx = txResult.rows[0];
 
-            if (finalStatus === 'FAILED') {
-                const parts = reference.split('-');
-                const email = parts[parts.length - 1]; 
-
-                await client.query(`
-                    UPDATE wallets SET 
-                        available_balance = available_balance + $1,
-                        updated_at = NOW()
-                    WHERE user_email = $2 AND currency = $3`,
-                    [parseFloat(amount), email, currency]
+            if (originalTx) {
+                // 1. Update the original transaction status
+                await client.query(
+                    "UPDATE transactions SET status = $1::voucher_status, updated_at = NOW() WHERE reference_id = $2",
+                    [finalStatus, reference]
                 );
 
-                await client.query(`
-                    INSERT INTO transactions (
-                        user_email, transaction_type, amount_usd, status, reference_id, currency
-                    ) VALUES ($1, 'REVERSED', $2, 'SUCCESSFUL'::voucher_status, $3, $4)`,
-                    [email, amount, `REF-${reference}`, currency]
-                );
+                if (finalStatus === 'SUCCESSFUL') {
+                    // Funds physically left FLW Merchant account. 
+                    // Internal deduction already happened during withdrawal request.
+                    console.log(`✅ Withdrawal Settled: ${amount} ${currency} for ${originalTx.user_email}`);
+                } 
+                else if (finalStatus === 'FAILED' || finalStatus === 'REJECTED') {
+                    // Physical funds NEVER left FLW. We must REFUND the available balance.
+                    await client.query(`
+                        UPDATE wallets SET 
+                            available_balance = available_balance + $1,
+                            updated_at = NOW()
+                        WHERE user_email = $2 AND currency = $3`,
+                        [parseFloat(amount), originalTx.user_email, currency]
+                    );
+
+                    // Log the reversal so the user knows why their balance went back up
+                    await client.query(`
+                        INSERT INTO transactions (
+                            user_email, transaction_type, amount_usd, status, reference_id, currency
+                        ) VALUES ($1, 'WITHDRAWAL_REVERSAL', $2, 'SUCCESSFUL'::voucher_status, $3, $4)`,
+                        [originalTx.user_email, amount, `REF-${reference}`, currency]
+                    );
+                    
+                    console.log(`↺ Withdrawal Failed: ${amount} ${currency} refunded to ${originalTx.user_email}`);
+                }
             }
         }
 
@@ -111,8 +123,7 @@ router.post('/flutterwave', async (req, res) => {
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
-        console.error("⚠️ Webhook Logic Error:", err.message);
-        // Still send 200 to FLW so they stop retrying a broken transaction
+        console.error("⚠️ Webhook Error:", err.message);
         res.status(200).send('Error Handled'); 
     } finally {
         if (client) client.release();
