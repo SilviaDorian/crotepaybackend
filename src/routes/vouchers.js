@@ -1,7 +1,7 @@
 import express from 'express';
 import crypto from 'crypto';
 import { query, getClient } from '../db/index.js';
-import { convertToUSD } from '../utils/payout.js'; // Imported recommended utility
+//import { convertToUSD } from '../utils/payout.js'; // Imported recommended utility
 
 const router = express.Router();
 const OWNER_EMAIL = 'deepxverified@gmail.com'; 
