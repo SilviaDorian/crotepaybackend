@@ -6,38 +6,41 @@ const router = express.Router();
 
 /**
  * 1. GET BALANCE & STATS
- * Returns the Available and Escrow balances, plus dashboard aggregates.
+ * Returns ALL currency ledgers for the user + total aggregates.
  */
 router.get('/dashboard/:email', async (req, res) => {
     try {
         const { email } = req.params;
 
-        // 1. Get Wallet Ledgers
+        // 1. Get ALL Wallet Ledgers (Multi-currency support)
         const walletRes = await query(
             "SELECT available_balance, escrow_balance, currency FROM wallets WHERE user_email = $1", 
             [email]
         );
         
-        // 2. Get Voucher Aggregates (Sync with your ENUMs)
+        // 2. Get Voucher Aggregates
+        // This calculates the total value of active vouchers across all currencies
         const statsRes = await query(
             `SELECT 
                 COUNT(*) FILTER (WHERE status = 'LOCKED'::voucher_status) as active_escrows,
                 COUNT(*) FILTER (WHERE status = 'RELEASED'::voucher_status) as total_completed,
-                COALESCE(SUM(amount) FILTER (WHERE status = 'LOCKED'::voucher_status), 0) as total_locked_value
+                COALESCE(SUM(usd_equivalent) FILTER (WHERE status = 'LOCKED'::voucher_status), 0) as total_locked_value
              FROM vouchers 
              WHERE creator_email = $1`,
             [email]
         );
 
-        const wallet = walletRes.rows[0] || { available_balance: "0.00", escrow_balance: "0.00", currency: "USD" };
+        // If no wallet exists yet, return a default USD starting point
+        const wallets = walletRes.rows.length > 0 ? walletRes.rows : [{ 
+            available_balance: "0.00", 
+            escrow_balance: "0.00", 
+            currency: "USD" 
+        }];
+
         const stats = statsRes.rows[0];
 
         res.json({
-            balances: {
-                available: wallet.available_balance,
-                escrow: wallet.escrow_balance,
-                currency: wallet.currency
-            },
+            wallets: wallets, // Changed from 'balances' to 'wallets' array
             summary: {
                 active_vouchers: parseInt(stats.active_escrows || 0),
                 completed_vouchers: parseInt(stats.total_completed || 0),
@@ -51,15 +54,16 @@ router.get('/dashboard/:email', async (req, res) => {
 });
 
 /**
- * 2. TRANSACTION HISTORY (Brief list for Dashboard)
+ * 2. TRANSACTION HISTORY
+ * Added 'currency' and 'amount' to ensure the UI knows which wallet a transaction belongs to.
  */
 router.get('/history/:email', async (req, res) => {
     try {
         const result = await query(
-            `SELECT transaction_type, amount_usd, status, created_at 
+            `SELECT transaction_type, amount, amount_usd, currency, status, created_at 
              FROM transactions 
              WHERE user_email = $1 
-             ORDER BY created_at DESC LIMIT 5`,
+             ORDER BY created_at DESC LIMIT 10`,
             [req.params.email]
         );
         res.json(result.rows);
