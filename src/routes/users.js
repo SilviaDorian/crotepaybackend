@@ -7,24 +7,27 @@ const router = express.Router();
 
 /**
  * 1. REGISTER (Starts at Tier 1)
- * Wallet Limit: $500 | Withdrawal Limit: $0
- */
-/**
- * 1. REGISTER (Starts at Tier 1)
+ * Optimized to work with your Supabase Wallet Trigger.
  */
 router.post('/register', async (req, res) => {
     const { email, password, full_name, country_name, country_code, currency } = req.body;
-    const client = await getClient();
+    let client;
 
     try {
+        client = await getClient();
         await client.query('BEGIN');
 
         const hashedPassword = await bcrypt.hash(password, 10);
         const userEmail = email.toLowerCase().trim();
 
-        // 1. Create User ONLY
-        // The Supabase trigger 'on_fielpay_signup' will catch this and 
-        // automatically create the 4 wallets (USD, GBP, EUR, Local).
+        // Check if user already exists first to avoid ugly Postgres errors
+        const check = await client.query("SELECT id FROM users WHERE email = $1", [userEmail]);
+        if (check.rows.length > 0) {
+            return res.status(400).json({ error: "Email already registered." });
+        }
+
+        // Create User ONLY
+        // Trigger 'on_fielpay_signup' handles wallet creation
         await client.query(
             `INSERT INTO users (
                 email, password_hash, full_name, 
@@ -32,9 +35,6 @@ router.post('/register', async (req, res) => {
             ) VALUES ($1, $2, $3, $4, $5, $6, 1)`,
             [userEmail, hashedPassword, full_name, country_name, country_code, currency.toUpperCase()]
         );
-
-        // --- IMPORTANT: REMOVE THE 'INSERT INTO wallets' BLOCK FROM HERE ---
-        // If you leave it here, it clashes with the database trigger.
 
         await client.query('COMMIT');
         res.status(201).json({ success: true, message: "Account created!" });
@@ -44,9 +44,11 @@ router.post('/register', async (req, res) => {
         console.error("Registration Error:", err.message);
         res.status(400).json({ error: "Registration failed." });
     } finally {
-        client.release();
+        if (client) client.release();
     }
-});/**
+});
+
+/**
  * 2. LOGIN
  */
 router.post('/login', async (req, res) => {
@@ -87,7 +89,6 @@ router.post('/login', async (req, res) => {
 
 /**
  * 3. TIER 2: REQUEST PHONE OTP
- * Fixed: Added verbose logging to identify 500 errors.
  */
 router.post('/request-phone-otp', async (req, res) => {
     const { email, phone_number } = req.body;
@@ -103,26 +104,24 @@ router.post('/request-phone-otp', async (req, res) => {
             [userEmail, otp]
         );
         
-        // Save the phone number to the user profile
         await query("UPDATE users SET phone_number = $1 WHERE email = $2", [phone_number, userEmail]);
 
-        // SUCCESS: Send the code back so the frontend can build the WhatsApp link
-        res.json({ 
-            success: true, 
-            code: otp 
-        });
+        res.json({ success: true, code: otp });
     } catch (err) {
         console.error("OTP Error:", err.message);
         res.status(500).json({ error: "Database error." });
     }
-});/**
+});
+
+/**
  * 4. TIER 2: VERIFY OTP (Upgrade to Tier 2)
  */
 router.post('/verify-phone-otp', async (req, res) => {
     const { email, code } = req.body;
-    const client = await getClient();
+    let client;
 
     try {
+        client = await getClient();
         await client.query('BEGIN');
         const userEmail = email.toLowerCase().trim();
 
@@ -141,7 +140,7 @@ router.post('/verify-phone-otp', async (req, res) => {
             [userEmail]
         );
 
-        // Increase Ledger Limits
+        // Increase Ledger Limits (Standard Tier 2 limits)
         await client.query(
             "UPDATE wallets SET daily_withdraw_limit = 500.00, max_balance_limit = 2000.00, updated_at = NOW() WHERE user_email = $1",
             [userEmail]
@@ -156,7 +155,7 @@ router.post('/verify-phone-otp', async (req, res) => {
         console.error("Verification Error:", err.message);
         res.status(400).json({ error: err.message });
     } finally {
-        client.release();
+        if (client) client.release();
     }
 });
 
@@ -186,6 +185,19 @@ router.post('/submit-docs', async (req, res) => {
     } catch (err) {
         console.error("KYC Submission Error:", err.message);
         res.status(500).json({ error: "Failed to update KYC documents." });
+    }
+});
+
+/**
+ * 6. REFRESH USER DATA (Handy for Frontend)
+ */
+router.get('/me/:email', async (req, res) => {
+    try {
+        const result = await query("SELECT id, email, full_name, preferred_currency, kyc_tier, kyc_status, phone_verified FROM users WHERE email = $1", [req.params.email.toLowerCase()]);
+        if (result.rows.length === 0) return res.status(404).json({ error: "User not found" });
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 

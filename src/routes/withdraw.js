@@ -1,7 +1,8 @@
 import express from 'express';
 import axios from 'axios';
-import { getClient } from '../db/index.js';
-import { triggerBankTransfer } from '../utils/payout.js';
+import { getClient, query } from '../db/index.js';
+// This utility MUST NOT import this route file back
+import { triggerBankTransfer } from '../utils/payout.js'; 
 
 const router = express.Router();
 
@@ -51,12 +52,12 @@ router.post('/request', async (req, res) => {
         return res.status(400).json({ error: "Invalid withdrawal amount." });
     }
 
-    const client = await getClient();
+    let client;
 
     try {
+        client = await getClient();
         await client.query('BEGIN');
 
-        // Fetch user and wallet with a LOCK to prevent race conditions
         const userRes = await client.query(
             `SELECT u.email, u.kyc_tier, w.available_balance, w.daily_withdraw_limit, w.currency as wallet_currency
              FROM users u 
@@ -71,7 +72,6 @@ router.post('/request', async (req, res) => {
         const requestedAmount = parseFloat(amount);
         const sourceCurrency = user.wallet_currency || 'USD';
 
-        // Validation Logic
         if (!isTester) {
             if (user.kyc_tier < 2) throw new Error("KYC Tier 2 required for withdrawals.");
             if (requestedAmount > parseFloat(user.daily_withdraw_limit)) throw new Error("Daily limit exceeded.");
@@ -81,10 +81,9 @@ router.post('/request', async (req, res) => {
         const serviceFee = requestedAmount * SERVICE_FEE_PERCENT;
         const netAmount = requestedAmount - serviceFee;
 
-        // Reference format: WD-Timestamp-Email (Webhook uses this to map the refund)
         const flwRef = `WD-${Date.now()}-${email.replace('@', '_at_')}`;
         
-        // Step A: Deduct funds internally BEFORE calling external API
+        // Step A: Deduct funds internally
         await client.query(
             "UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
             [requestedAmount, email, sourceCurrency]
@@ -100,11 +99,11 @@ router.post('/request', async (req, res) => {
             reference: flwRef
         });
 
-        // Step C: Record the "Processing" transaction
+        // Step C: Record transaction (REMOVED ::voucher_status cast to prevent crash)
         await client.query(`
             INSERT INTO transactions (
                 user_email, transaction_type, amount_usd, fee_usd, status, reference_id, currency, metadata
-            ) VALUES ($1, 'WITHDRAWAL', $2, $3, 'PROCESSING'::voucher_status, $4, $5, $6)`,
+            ) VALUES ($1, 'WITHDRAWAL', $2, $3, 'PROCESSING', $4, $5, $6)`,
             [
                 email, requestedAmount, serviceFee, flwRef, sourceCurrency,
                 JSON.stringify({
@@ -129,6 +128,7 @@ router.post('/request', async (req, res) => {
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
+        console.error("Withdrawal Error:", err.message);
         res.status(400).json({ error: err.message });
     } finally {
         if (client) client.release();
