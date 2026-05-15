@@ -1,14 +1,14 @@
 import express from 'express';
 import crypto from 'crypto';
 import { query, getClient } from '../db/index.js';
-//import { convertToUSD } from '../utils/payout.js'; // Imported recommended utility
+import { convertToUSD } from '../utils/converter.js'; // Pointed to new file
 
 const router = express.Router();
 const OWNER_EMAIL = 'deepxverified@gmail.com'; 
 
 /**
  * 1. CREATE VOUCHER
- * Now uses Flutterwave Rates for the USD equivalent to ensure ledger accuracy.
+ * Now uses the isolated converter utility.
  */
 router.post('/create', async (req, res) => {
     const { 
@@ -27,7 +27,7 @@ router.post('/create', async (req, res) => {
         if (!user) return res.status(404).json({ error: "Creator account not found." });
         if (user.kyc_tier < 1) return res.status(403).json({ error: "KYC Tier 1 required." });
 
-        // Switch to the FLW-backed converter
+        // Using the utility from the new file
         const usdValue = await convertToUSD(amount, currency);
         
         const rawKey = crypto.randomBytes(8).toString('hex');
