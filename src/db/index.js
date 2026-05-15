@@ -10,30 +10,17 @@ const poolConfig = {
     ssl: {
         rejectUnauthorized: false
     },
-    connectionTimeoutMillis: 15000, // Increased to 15s for slower networks
+    connectionTimeoutMillis: 15000,
     max: 20, 
     idleTimeoutMillis: 30000 
 };
 
 const pool = new Pool(poolConfig);
 
-// Improved Connection Test with Retry
-const connectWithRetry = () => {
-    pool.connect((err, client, release) => {
-        if (err) {
-            console.error('❌ DB CONNECTION FAILED. Retrying in 5 seconds...', err.message);
-            setTimeout(connectWithRetry, 5000); // Retry every 5 seconds
-        } else {
-            console.log('🐘 Database Connected Successfully');
-            release();
-        }
-    });
-};
-
-connectWithRetry();
+// REMOVED: connectWithRetry() call here. 
+// We will let the app handle the first connection attempt in app.js or index.js.
 
 pool.on('error', (err) => {
-    // This handles errors on idle clients in the pool
     console.error('❌ UNEXPECTED DATABASE POOL ERROR:', err.message);
 });
 
@@ -56,6 +43,19 @@ export const runTransaction = async (callback) => {
 };
 
 export const getClient = () => pool.connect();
+
+// Utility to test connection without a persistent loop
+export const testConnection = async () => {
+    try {
+        const client = await pool.connect();
+        console.log('🐘 Database Connected Successfully');
+        client.release();
+        return true;
+    } catch (err) {
+        console.error('❌ DB CONNECTION FAILED:', err.message);
+        return false;
+    }
+};
 
 process.on('SIGINT', async () => {
     await pool.end();
