@@ -5,23 +5,31 @@ import { triggerBankTransfer } from '../utils/payout.js';
 const router = express.Router();
 const OWNER_EMAIL = 'deepxverified@gmail.com'; 
 
+// Centralized rates object for consistency
+const LIVE_RATES = {
+    'NGN': 1550.00,
+    'GBP': 0.79,
+    'EUR': 0.92,
+    'GHS': 14.50,
+    'USD': 1.00
+};
+
 /**
- * 1. GET /api/revenue/rates/:currency
- * Provides exchange rates for frontend calculations.
+ * 1. GET /api/revenue/rates/all
+ * NEW: Provides all rates in one go for the Dashboard Net Worth calculation.
+ */
+router.get('/rates/all', (req, res) => {
+    res.json(LIVE_RATES);
+});
+
+/**
+ * 2. GET /api/revenue/rates/:currency
+ * Existing: Provides specific rate.
  */
 router.get('/rates/:currency', async (req, res) => {
     const { currency } = req.params;
-    
-    // Default fallback rates
-    const rates = {
-        'NGN': 1550.00,
-        'GBP': 0.79,
-        'EUR': 0.92,
-        'USD': 1.00
-    };
-
     const targetCurrency = currency.toUpperCase();
-    const rate = rates[targetCurrency] || 1.0;
+    const rate = LIVE_RATES[targetCurrency] || 1.0;
 
     res.json({ 
         success: true, 
@@ -31,7 +39,7 @@ router.get('/rates/:currency', async (req, res) => {
 });
 
 /**
- * 2. GET /api/revenue/stats
+ * 3. GET /api/revenue/stats
  * Dashboard data for the Admin (OWNER_EMAIL).
  */
 router.get('/stats', async (req, res) => {
@@ -42,7 +50,6 @@ router.get('/stats', async (req, res) => {
     }
 
     try {
-        // Updated to sum fees from both Escrow Releases and Withdrawals
         const stats = await query(
             `SELECT 
                 SUM(fee_usd) as total_revenue,
@@ -72,7 +79,7 @@ router.get('/stats', async (req, res) => {
 });
 
 /**
- * 3. POST /api/revenue/withdraw
+ * 4. POST /api/revenue/withdraw
  * Moves Admin commission to bank.
  */
 router.post('/withdraw', async (req, res) => {
@@ -101,16 +108,13 @@ router.post('/withdraw', async (req, res) => {
             throw new Error("Insufficient revenue balance.");
         }
 
-        // 1. Deduct from Admin Wallet
         await client.query(
             "UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2",
             [withdrawalAmount, OWNER_EMAIL]
         );
 
-        // 2. Generate Reference (Sanitized)
         const reference = `REV-WD-${Date.now()}-${OWNER_EMAIL.replace('@', '_at_')}`;
 
-        // 3. Log Transaction
         await client.query(`
             INSERT INTO transactions (
                 user_email, transaction_type, amount_usd, status, reference_id
@@ -118,7 +122,6 @@ router.post('/withdraw', async (req, res) => {
             [OWNER_EMAIL, 'SYSTEM_WITHDRAWAL', withdrawalAmount, reference]
         );
 
-        // 4. Trigger Payout
         await triggerBankTransfer({
             amount: withdrawalAmount,
             currency: currency || 'NGN',
