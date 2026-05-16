@@ -11,20 +11,20 @@ router.get('/dashboard/:email', async (req, res) => {
         const { email } = req.params;
 
         // 1. Get ALL Wallet Ledgers
+        // Explicitly using public schema for reliability
         const walletRes = await query(
-            "SELECT available_balance, escrow_balance, currency FROM wallets WHERE user_email = $1", 
+            "SELECT available_balance, escrow_balance, currency FROM public.wallets WHERE user_email = $1", 
             [email]
         );
         
         // 2. Get Voucher Aggregates 
-        // Note: I removed the ::voucher_status cast here to make it more resilient 
-        // if the ENUM hasn't propagated yet.
+        // Note: Using usd_equivalent for the locked value as per your vouchers table schema
         const statsRes = await query(
             `SELECT 
                 COUNT(*) FILTER (WHERE status = 'LOCKED') as active_escrows,
                 COUNT(*) FILTER (WHERE status = 'RELEASED') as total_completed,
                 COALESCE(SUM(usd_equivalent) FILTER (WHERE status = 'LOCKED'), 0) as total_locked_value
-             FROM vouchers 
+             FROM public.vouchers 
              WHERE creator_email = $1`,
             [email]
         );
@@ -56,10 +56,10 @@ router.get('/dashboard/:email', async (req, res) => {
  */
 router.get('/history/:email', async (req, res) => {
     try {
-        // Aligned with setup.js: using amount_usd and reference_id
+        // FIXED: Changed 'amount_usd' to 'amount' to match your DB schema
         const result = await query(
-            `SELECT transaction_type, amount_usd, currency, status, created_at, reference_id
-             FROM transactions 
+            `SELECT transaction_type, amount, currency, status, created_at, reference_id
+             FROM public.transactions 
              WHERE user_email = $1 
              ORDER BY created_at DESC LIMIT 15`,
             [req.params.email]
@@ -67,6 +67,7 @@ router.get('/history/:email', async (req, res) => {
         res.json(result.rows);
     } catch (err) {
         console.error("History Fetch Error:", err.message);
+        // This is where your previous 'column amount_usd does not exist' error was triggered
         res.status(500).json({ error: "Could not retrieve history." });
     }
 });

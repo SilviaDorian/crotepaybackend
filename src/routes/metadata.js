@@ -6,18 +6,21 @@ const router = express.Router();
 /**
  * GET /api/metadata/rates
  * Fetches real-time exchange rates from Flutterwave.
- * This ensures the frontend matches the actual payout engine.
  */
 router.get('/rates', async (req, res) => {
     try {
-        const { source = 'USD', target = 'NGN', amount = 1 } = req.query;
+        // Sanitize and provide strict defaults
+        const source = (req.query.source || 'USD').toUpperCase().trim();
+        const target = (req.query.target || 'NGN').toUpperCase().trim();
+        const amount = parseFloat(req.query.amount) || 1;
 
-        // We use Flutterwave's rate endpoint instead of an external 3rd party
+        // Flutterwave Rate API Endpoint
         const url = `https://api.flutterwave.com/v3/transfers/rates?amount=${amount}&destination_currency=${target}&source_currency=${source}`;
 
         const response = await axios.get(url, {
             headers: {
-                Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`
+                Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
+                'Content-Type': 'application/json'
             }
         });
 
@@ -33,34 +36,34 @@ router.get('/rates', async (req, res) => {
                 timestamp: new Date().toISOString()
             });
         } else {
-            throw new Error("Invalid response from Flutterwave Rates API");
+            throw new Error("Invalid response format from clearing provider.");
         }
     } catch (error) {
         const errorMsg = error.response?.data?.message || error.message;
         console.error("Exchange Rate Fetch Error:", errorMsg);
         
-        // Fallback: If Flutterwave is down, you can return a 500 or a cached rate
         res.status(500).json({ 
             success: false, 
-            error: "Could not retrieve live exchange rates from the clearing provider." 
+            error: "Could not retrieve live exchange rates.",
+            details: process.env.NODE_ENV === 'development' ? errorMsg : undefined
         });
     }
 });
 
 /**
- * GET /api/metadata/supported-countries
- * Useful for the frontend to populate withdrawal country dropdowns
+ * GET /api/metadata/countries
+ * Populates frontend dropdowns for withdrawals and transfers.
  */
 router.get('/countries', (req, res) => {
     const countries = [
-        { name: "Nigeria", code: "NG", currency: "NGN" },
-        { name: "Ghana", code: "GH", currency: "GHS" },
-        { name: "Kenya", code: "KE", currency: "KES" },
-        { name: "United States", code: "US", currency: "USD" },
-        { name: "United Kingdom", code: "GB", currency: "GBP" },
-        { name: "Europe", code: "EU", currency: "EUR" },
-        { name: "Uganda", code: "UG", currency: "UGX" },
-        { name: "South Africa", code: "ZA", currency: "ZAR" }
+        { name: "Nigeria", code: "NG", currency: "NGN", flag: "🇳🇬" },
+        { name: "Ghana", code: "GH", currency: "GHS", flag: "🇬🇭" },
+        { name: "Kenya", code: "KE", currency: "KES", flag: "🇰🇪" },
+        { name: "United States", code: "US", currency: "USD", flag: "🇺🇸" },
+        { name: "United Kingdom", code: "GB", currency: "GBP", flag: "🇬🇧" },
+        { name: "Europe", code: "EU", currency: "EUR", flag: "🇪🇺" },
+        { name: "Uganda", code: "UG", currency: "UGX", flag: "🇺🇬" },
+        { name: "South Africa", code: "ZA", currency: "ZAR", flag: "🇿🇦" }
     ];
     res.json({ success: true, data: countries });
 });

@@ -16,7 +16,6 @@ const LIVE_RATES = {
 
 /**
  * 1. GET /api/revenue/rates/all
- * NEW: Provides all rates in one go for the Dashboard Net Worth calculation.
  */
 router.get('/rates/all', (req, res) => {
     res.json(LIVE_RATES);
@@ -24,7 +23,6 @@ router.get('/rates/all', (req, res) => {
 
 /**
  * 2. GET /api/revenue/rates/:currency
- * Existing: Provides specific rate.
  */
 router.get('/rates/:currency', async (req, res) => {
     const { currency } = req.params;
@@ -50,16 +48,17 @@ router.get('/stats', async (req, res) => {
     }
 
     try {
+        // FIXED: Changed fee_usd to fee
         const stats = await query(
             `SELECT 
-                SUM(fee_usd) as total_revenue,
+                SUM(fee) as total_revenue,
                 COUNT(*) as total_transactions
-             FROM transactions 
-             WHERE status = 'SUCCESSFUL'::voucher_status`
+             FROM public.transactions 
+             WHERE status = 'SUCCESSFUL'::text::voucher_status`
         );
 
         const currentBalance = await query(
-            "SELECT available_balance FROM wallets WHERE user_email = $1",
+            "SELECT available_balance FROM public.wallets WHERE user_email = $1",
             [OWNER_EMAIL]
         );
 
@@ -89,10 +88,12 @@ router.post('/withdraw', async (req, res) => {
         return res.status(403).json({ error: "Unauthorized access." });
     }
 
-    const client = await getClient();
+    let client;
 
     try {
+        client = await getClient();
         await client.query('BEGIN');
+        await client.query('SET search_path TO public');
 
         const walletRes = await client.query(
             "SELECT available_balance FROM wallets WHERE user_email = $1 FOR UPDATE",
@@ -108,6 +109,7 @@ router.post('/withdraw', async (req, res) => {
             throw new Error("Insufficient revenue balance.");
         }
 
+        // FIXED: Using updated_at to match wallet schema
         await client.query(
             "UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2",
             [withdrawalAmount, OWNER_EMAIL]
@@ -115,10 +117,11 @@ router.post('/withdraw', async (req, res) => {
 
         const reference = `REV-WD-${Date.now()}-${OWNER_EMAIL.replace('@', '_at_')}`;
 
+        // FIXED: amount_usd -> amount | added ::text::voucher_status
         await client.query(`
             INSERT INTO transactions (
-                user_email, transaction_type, amount_usd, status, reference_id
-            ) VALUES ($1, $2, $3, 'PROCESSING'::voucher_status, $4)`,
+                user_email, transaction_type, amount, status, reference_id
+            ) VALUES ($1, $2, $3, 'PROCESSING'::text::voucher_status, $4)`,
             [OWNER_EMAIL, 'SYSTEM_WITHDRAWAL', withdrawalAmount, reference]
         );
 

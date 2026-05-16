@@ -5,20 +5,19 @@ const router = express.Router();
 
 /**
  * 1. GET /api/history/wallets
- * Removed 'id' column since it doesn't exist in your table
  */
 router.get('/wallets', async (req, res) => {
     const { email } = req.query;
     if (!email) return res.status(400).json({ error: "Email is required" });
 
     try {
-        // Removed 'id' from the SELECT list
+        // Kept 'currency' because it exists in your schema!
         const result = await query(
             `SELECT 
                 currency, 
                 available_balance, 
                 escrow_balance
-             FROM wallets 
+             FROM public.wallets 
              WHERE user_email = $1 
              ORDER BY 
                 CASE 
@@ -39,22 +38,23 @@ router.get('/wallets', async (req, res) => {
 
 /**
  * 2. GET /api/history/transactions
- * Removed 'currency' column and added 'amount_usd' as primary display
  */
 router.get('/transactions', async (req, res) => {
     const { email } = req.query;
     if (!email) return res.status(400).json({ error: "Email required" });
 
     try {
-        // Removed 'currency' from SELECT because it's missing in your DB
+        // FIXED: Changed 'amount_usd' to 'amount'
+        // FIXED: Added 'currency' back because your schema confirmed it exists
         const result = await query(
             `SELECT 
                 transaction_type, 
-                amount_usd, 
+                amount, 
+                currency,
                 status, 
                 reference_id, 
                 TO_CHAR(created_at, 'DD Mon YYYY, HH:MI AM') as formatted_date 
-             FROM transactions 
+             FROM public.transactions 
              WHERE user_email = $1 
              ORDER BY created_at DESC`,
             [email.toLowerCase().trim()]
@@ -78,16 +78,17 @@ router.get('/wallet-stats', async (req, res) => {
     if (!email) return res.status(400).json({ error: "Email required" });
 
     try {
+        // FIXED: Changed 'amount_usd' to 'amount' in the SUM logic
         const stats = await query(
             `SELECT 
-                COALESCE(SUM(CASE WHEN transaction_type IN ('ESCROW_RELEASE', 'REVERSED') AND status = 'SUCCESSFUL' THEN amount_usd ELSE 0 END), 0) as total_in,
-                COALESCE(SUM(CASE WHEN transaction_type = 'WITHDRAWAL' AND status = 'SUCCESSFUL' THEN amount_usd ELSE 0 END), 0) as total_out
-             FROM transactions WHERE user_email = $1`,
+                COALESCE(SUM(CASE WHEN transaction_type IN ('ESCROW_RELEASE', 'REVERSED') AND status = 'SUCCESSFUL' THEN amount ELSE 0 END), 0) as total_in,
+                COALESCE(SUM(CASE WHEN transaction_type = 'WITHDRAWAL' AND status = 'SUCCESSFUL' THEN amount ELSE 0 END), 0) as total_out
+             FROM public.transactions WHERE user_email = $1`,
             [email.toLowerCase().trim()]
         );
 
         const wallet = await query(
-            "SELECT available_balance, escrow_balance FROM wallets WHERE user_email = $1 LIMIT 1",
+            "SELECT available_balance, escrow_balance FROM public.wallets WHERE user_email = $1 LIMIT 1",
             [email.toLowerCase().trim()]
         );
 
@@ -99,6 +100,7 @@ router.get('/wallet-stats', async (req, res) => {
             outflow: parseFloat(stats.rows[0].total_out)
         });
     } catch (err) {
+        console.error("Stats error:", err.message);
         res.status(500).json({ error: "Stats error" });
     }
 });

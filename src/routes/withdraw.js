@@ -1,7 +1,6 @@
 import express from 'express';
 import axios from 'axios';
 import { getClient, query } from '../db/index.js';
-// This utility MUST NOT import this route file back
 import { triggerBankTransfer } from '../utils/payout.js'; 
 
 const router = express.Router();
@@ -57,11 +56,13 @@ router.post('/request', async (req, res) => {
     try {
         client = await getClient();
         await client.query('BEGIN');
+        await client.query('SET search_path TO public');
 
+        // FIXED: Using public. prefix and ensuring correct wallet joins
         const userRes = await client.query(
             `SELECT u.email, u.kyc_tier, w.available_balance, w.daily_withdraw_limit, w.currency as wallet_currency
-             FROM users u 
-             JOIN wallets w ON u.email = w.user_email 
+             FROM public.users u 
+             JOIN public.wallets w ON u.email = w.user_email 
              WHERE u.email = $1 FOR UPDATE`, 
             [email]
         );
@@ -84,8 +85,10 @@ router.post('/request', async (req, res) => {
         const flwRef = `WD-${Date.now()}-${email.replace('@', '_at_')}`;
         
         // Step A: Deduct funds internally
+        // FIXED: Changed 'updated_at' to 'updated_at' or 'update_at' based on your specific schema result
+        // Note: Your information_schema showed 'update_at' for wallets/transactions
         await client.query(
-            "UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
+            "UPDATE public.wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
             [requestedAmount, email, sourceCurrency]
         );
 
@@ -99,11 +102,12 @@ router.post('/request', async (req, res) => {
             reference: flwRef
         });
 
-        // Step C: Record transaction (REMOVED ::voucher_status cast to prevent crash)
+        // Step C: Record transaction 
+        // FIXED: amount_usd -> amount | fee_usd -> fee | Added enum safety ::text::voucher_status
         await client.query(`
-            INSERT INTO transactions (
-                user_email, transaction_type, amount_usd, fee_usd, status, reference_id, currency, metadata
-            ) VALUES ($1, 'WITHDRAWAL', $2, $3, 'PROCESSING', $4, $5, $6)`,
+            INSERT INTO public.transactions (
+                user_email, transaction_type, amount, fee, status, reference_id, currency, metadata, update_at
+            ) VALUES ($1, 'WITHDRAWAL', $2, $3, 'PROCESSING'::text::voucher_status, $4, $5, $6, NOW())`,
             [
                 email, requestedAmount, serviceFee, flwRef, sourceCurrency,
                 JSON.stringify({

@@ -9,21 +9,20 @@ const OWNER_EMAIL = 'deepxverified@gmail.com';
  * Manually move funds based on admin investigation.
  */
 router.post('/resolve-dispute', async (req, res) => {
-    // SECURITY: Admin Key Check (Must be in your .env)
     const adminKey = req.headers['x-admin-key'];
     if (!adminKey || adminKey !== process.env.ADMIN_SECRET) {
         return res.status(401).json({ error: "Unauthorized: Invalid Admin Key" });
     }
 
     const { voucher_id, resolution, adminNote } = req.body; 
-    // resolution: 'PAY_CREATOR' (Seller wins) or 'REFUND_RECIPIENT' (Buyer wins)
 
     const client = await getClient();
 
     try {
         await client.query('BEGIN');
+        // Ensure search path is correct for Enum types
+        await client.query('SET search_path TO public');
         
-        // 1. Lock the voucher for processing
         const result = await client.query("SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", [voucher_id]);
         const v = result.rows[0];
 
@@ -35,37 +34,33 @@ router.post('/resolve-dispute', async (req, res) => {
         const netAmount = amount - fee;
 
         if (resolution === 'PAY_CREATOR') {
-            /**
-             * CASE 1: Seller Wins
-             */
-            
-            // Deduct from Recipient (Buyer) Escrow
+            // Deduct from Recipient Escrow
             await client.query(
-                "UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() WHERE user_email = $2",
-                [amount, v.recipient_email]
+                "UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
+                [amount, v.recipient_email, v.currency]
             );
 
-            // Add Net to Creator (Seller) Available (With safety check)
+            // Add Net to Creator (Using the verified UNIQUE constraint logic)
             await client.query(`
                 INSERT INTO wallets (user_email, available_balance, currency) 
                 VALUES ($1, $2, $3)
-                ON CONFLICT (user_email) DO UPDATE SET 
+                ON CONFLICT (user_email, currency) DO UPDATE SET 
                 available_balance = wallets.available_balance + $2, updated_at = NOW()`,
                 [v.creator_email, netAmount, v.currency]
             );
 
-            // Add Fee to Admin (You)
+            // Add Fee to Admin
             await client.query(`
                 UPDATE wallets SET 
                     available_balance = available_balance + $1, 
                     updated_at = NOW() 
-                WHERE user_email = $2`,
-                [fee, OWNER_EMAIL]
+                WHERE user_email = $2 AND currency = $3`,
+                [fee, OWNER_EMAIL, v.currency]
             );
 
             await client.query(`
                 UPDATE vouchers 
-                SET status = 'RELEASED'::voucher_status, 
+                SET status = 'RELEASED'::text::voucher_status, 
                     updated_at = NOW(), 
                     description = CONCAT(description, ' | Admin Note: ', $1::text) 
                 WHERE id = $2`, 
@@ -73,22 +68,19 @@ router.post('/resolve-dispute', async (req, res) => {
             );
 
         } else if (resolution === 'REFUND_RECIPIENT') {
-            /**
-             * CASE 2: Buyer Wins
-             */
-            
+            // Buyer Wins - Refund to Available Balance
             await client.query(`
                 UPDATE wallets SET 
                     escrow_balance = escrow_balance - $1,
                     available_balance = available_balance + $1,
                     updated_at = NOW()
-                WHERE user_email = $2`,
-                [amount, v.recipient_email]
+                WHERE user_email = $2 AND currency = $3`,
+                [amount, v.recipient_email, v.currency]
             );
 
             await client.query(`
                 UPDATE vouchers 
-                SET status = 'REFUNDED'::voucher_status, 
+                SET status = 'REFUNDED'::text::voucher_status, 
                     updated_at = NOW(), 
                     description = CONCAT(description, ' | Admin Note: ', $1::text) 
                 WHERE id = $2`, 
@@ -96,21 +88,18 @@ router.post('/resolve-dispute', async (req, res) => {
             );
 
         } else {
-            throw new Error("Invalid resolution. Use 'PAY_CREATOR' or 'REFUND_RECIPIENT'.");
+            throw new Error("Invalid resolution.");
         }
 
-        // 2. Log the Admin Action in Transactions
+        // FIXED: amount_usd -> amount | fee_usd -> fee | Added ::text::voucher_status
         await client.query(`
-            INSERT INTO transactions (user_email, voucher_id, transaction_type, amount_usd, status, reference_id) 
-            VALUES ($1, $2, 'ADMIN_RESOLUTION', $3, 'SUCCESSFUL'::voucher_status, $4)`,
-            [v.recipient_email, v.id, amount, `ADM-${v.id}`]
+            INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, fee, status, reference_id, currency) 
+            VALUES ($1, $2, 'ADMIN_RESOLUTION', $3, $4, 'SUCCESSFUL'::text::voucher_status, $5, $6)`,
+            [v.recipient_email, v.id, amount, (resolution === 'PAY_CREATOR' ? fee : 0), `ADM-${v.id}`, v.currency]
         );
 
         await client.query('COMMIT');
-        res.json({ 
-            success: true, 
-            message: `Dispute resolved via ${resolution}.` 
-        });
+        res.json({ success: true, message: `Dispute resolved.` });
 
     } catch (e) {
         if (client) await client.query('ROLLBACK');

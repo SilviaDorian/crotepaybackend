@@ -7,7 +7,6 @@ const router = express.Router();
 
 /**
  * 1. REGISTER (Starts at Tier 1)
- * Optimized to work with your Supabase Wallet Trigger.
  */
 router.post('/register', async (req, res) => {
     const { email, password, full_name, country_name, country_code, currency } = req.body;
@@ -16,24 +15,23 @@ router.post('/register', async (req, res) => {
     try {
         client = await getClient();
         await client.query('BEGIN');
+        await client.query('SET search_path TO public');
 
         const hashedPassword = await bcrypt.hash(password, 10);
         const userEmail = email.toLowerCase().trim();
 
-        // Check if user already exists first to avoid ugly Postgres errors
         const check = await client.query("SELECT id FROM users WHERE email = $1", [userEmail]);
         if (check.rows.length > 0) {
             return res.status(400).json({ error: "Email already registered." });
         }
 
-        // Create User ONLY
-        // Trigger 'on_fielpay_signup' handles wallet creation
+        // Tier 1 defaults
         await client.query(
             `INSERT INTO users (
                 email, password_hash, full_name, 
                 country_name, country_code, preferred_currency, kyc_tier
             ) VALUES ($1, $2, $3, $4, $5, $6, 1)`,
-            [userEmail, hashedPassword, full_name, country_name, country_code, currency.toUpperCase()]
+            [userEmail, hashedPassword, full_name, country_name, country_code, (currency || 'USD').toUpperCase()]
         );
 
         await client.query('COMMIT');
@@ -54,7 +52,7 @@ router.post('/register', async (req, res) => {
 router.post('/login', async (req, res) => {
     const { email, password } = req.body;
     try {
-        const result = await query("SELECT * FROM users WHERE email = $1", [email.toLowerCase().trim()]);
+        const result = await query("SELECT * FROM public.users WHERE email = $1", [email.toLowerCase().trim()]);
         const user = result.rows[0];
         
         if (!user || !(await bcrypt.compare(password, user.password_hash))) {
@@ -63,7 +61,7 @@ router.post('/login', async (req, res) => {
 
         const token = jwt.sign(
             { email: user.email, kyc_tier: user.kyc_tier }, 
-            process.env.JWT_SECRET || 'fallback_secret', 
+            process.env.JWT_SECRET || 'fielpay_secret_key_2024', 
             { expiresIn: '24h' }
         );
 
@@ -72,13 +70,13 @@ router.post('/login', async (req, res) => {
             token, 
             user: { 
                 id: user.id,
-                full_name: user.full_name || "User", 
+                full_name: user.full_name, 
                 email: user.email, 
-                currency: user.preferred_currency || "USD",
-                kyc_tier: parseInt(user.kyc_tier) || 1,
-                kyc_status: user.kyc_status || 'NONE',
-                phone_number: user.phone_number || null, 
-                phone_verified: user.phone_verified || false
+                currency: user.preferred_currency,
+                kyc_tier: parseInt(user.kyc_tier),
+                kyc_status: user.kyc_status,
+                phone_number: user.phone_number, 
+                phone_verified: user.phone_verified
             } 
         });
     } catch (err) {
@@ -98,13 +96,14 @@ router.post('/request-phone-otp', async (req, res) => {
 
     try {
         const userEmail = email.toLowerCase().trim();
-        await query("DELETE FROM verification_codes WHERE email = $1", [userEmail]); 
+        // Use public schema for verification codes
+        await query("DELETE FROM public.verification_codes WHERE email = $1", [userEmail]); 
         await query(
-            "INSERT INTO verification_codes (email, code, expires_at) VALUES ($1, $2, NOW() + INTERVAL '10 minutes')", 
+            "INSERT INTO public.verification_codes (email, code, expires_at) VALUES ($1, $2, NOW() + INTERVAL '10 minutes')", 
             [userEmail, otp]
         );
         
-        await query("UPDATE users SET phone_number = $1 WHERE email = $2", [phone_number, userEmail]);
+        await query("UPDATE public.users SET phone_number = $1 WHERE email = $2", [phone_number, userEmail]);
 
         res.json({ success: true, code: otp });
     } catch (err) {
@@ -123,6 +122,8 @@ router.post('/verify-phone-otp', async (req, res) => {
     try {
         client = await getClient();
         await client.query('BEGIN');
+        await client.query('SET search_path TO public');
+        
         const userEmail = email.toLowerCase().trim();
 
         const result = await client.query(
@@ -134,13 +135,13 @@ router.post('/verify-phone-otp', async (req, res) => {
             throw new Error("Invalid or expired code.");
         }
 
-        // Upgrade User
+        // Upgrade User - targeting updated_at
         await client.query(
             "UPDATE users SET kyc_tier = 2, phone_verified = true, updated_at = NOW() WHERE email = $1",
             [userEmail]
         );
 
-        // Increase Ledger Limits (Standard Tier 2 limits)
+        // Increase Ledger Limits
         await client.query(
             "UPDATE wallets SET daily_withdraw_limit = 500.00, max_balance_limit = 2000.00, updated_at = NOW() WHERE user_email = $1",
             [userEmail]
@@ -165,13 +166,10 @@ router.post('/verify-phone-otp', async (req, res) => {
 router.post('/submit-docs', async (req, res) => {
     const { email, tax_id, document_url, video_url } = req.body;
 
-    if (!tax_id || !document_url) {
-        return res.status(400).json({ error: "Documents and Tax ID are required." });
-    }
-
     try {
+        // Aligned with user schema columns
         await query(
-            `UPDATE users SET 
+            `UPDATE public.users SET 
                 tax_id = $1, 
                 document_url = $2, 
                 video_url = $3,
@@ -181,7 +179,7 @@ router.post('/submit-docs', async (req, res) => {
             [tax_id, document_url, video_url || null, email.toLowerCase().trim()]
         );
 
-        res.json({ success: true, message: "Documents submitted for manual review." });
+        res.json({ success: true, message: "Documents submitted for review." });
     } catch (err) {
         console.error("KYC Submission Error:", err.message);
         res.status(500).json({ error: "Failed to update KYC documents." });
@@ -189,11 +187,14 @@ router.post('/submit-docs', async (req, res) => {
 });
 
 /**
- * 6. REFRESH USER DATA (Handy for Frontend)
+ * 6. REFRESH USER DATA
  */
 router.get('/me/:email', async (req, res) => {
     try {
-        const result = await query("SELECT id, email, full_name, preferred_currency, kyc_tier, kyc_status, phone_verified FROM users WHERE email = $1", [req.params.email.toLowerCase()]);
+        const result = await query(
+            "SELECT id, email, full_name, preferred_currency, kyc_tier, kyc_status, phone_verified, phone_number FROM public.users WHERE email = $1", 
+            [req.params.email.toLowerCase()]
+        );
         if (result.rows.length === 0) return res.status(404).json({ error: "User not found" });
         res.json(result.rows[0]);
     } catch (err) {

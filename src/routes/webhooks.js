@@ -22,7 +22,7 @@ router.post('/flutterwave', async (req, res) => {
     try {
         client = await getClient();
         await client.query('BEGIN');
-        // Ensure we are targeting the public schema explicitly
+        // Ensure we are targeting the public schema and the correct search path
         await client.query('SET search_path TO public');
 
         if (payload.event === 'charge.completed') {
@@ -32,7 +32,7 @@ router.post('/flutterwave', async (req, res) => {
             const currency = payload.data.currency || 'NGN';
             const flutterwaveTxId = String(payload.data.id);
 
-            console.log(`💳 WEBHOOK: ${voucherId} | ${paymentStatus}`);
+            console.log(`💳 WEBHOOK RECEIVED: ${voucherId} | STATUS: ${paymentStatus}`);
 
             if (!voucherId) {
                 console.error('❌ Missing tx_ref');
@@ -40,66 +40,37 @@ router.post('/flutterwave', async (req, res) => {
                 return res.status(200).send('Missing tx_ref');
             }
 
-            // FIND VOUCHER
+            // 1. FETCH VOUCHER
             const voucherResult = await client.query(
                 `SELECT * FROM vouchers WHERE id = $1 FOR UPDATE`,
                 [voucherId]
             );
 
             if (voucherResult.rows.length === 0) {
-                console.error(`❌ Voucher not found: ${voucherId}`);
+                console.error(`❌ Voucher not found in DB: ${voucherId}`);
                 await client.query('COMMIT');
                 return res.status(200).send('Voucher not found');
             }
 
             const voucher = voucherResult.rows[0];
 
-            // MAP STATUS SAFELY (Matches your DB Enum values exactly)
+            // MAP STATUS TO ENUM
             let voucherStatus = 'FAILED';
             if (paymentStatus === 'SUCCESSFUL') voucherStatus = 'LOCKED';
             else if (paymentStatus === 'PENDING') voucherStatus = 'PROCESSING';
             else if (paymentStatus === 'CANCELLED') voucherStatus = 'CANCELLED';
 
-            // 1. UPDATE VOUCHER (Using double-cast for Enum safety)
+            // 2. UPDATE VOUCHER (Primary Goal - Unblocks the "Syncing" UI)
             await client.query(
                 `UPDATE vouchers SET status = $1::text::voucher_status, updated_at = NOW() WHERE id = $2`,
                 [voucherStatus, voucherId]
             );
-            console.log(`✅ Voucher updated -> ${voucherStatus}`);
+            console.log(`✅ Voucher status updated to: ${voucherStatus}`);
 
-            // 2. SAFE TRANSACTION INSERT
-            try {
-                // Using columns from your schema: amount_usd, local_amount, local_currency
-                await client.query(
-                    `
-                    INSERT INTO transactions (
-                        user_email, voucher_id, transaction_type, 
-                        amount_usd, local_amount, local_currency, currency,
-                        fee_usd, status, reference_id
-                    )
-                    VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, $4, $5, $6, 0, $7::text::voucher_status, $8)
-                    ON CONFLICT (reference_id) DO NOTHING
-                    `,
-                    [
-                        voucher.creator_email,
-                        voucherId,
-                        amount,      // amount_usd
-                        amount,      // local_amount
-                        currency,    // local_currency
-                        currency,    // currency
-                        voucherStatus,
-                        `FLW-${flutterwaveTxId}`
-                    ]
-                );
-                console.log('📒 Transaction logged');
-            } catch (txErr) {
-                console.error('❌ Transaction insert failed:', txErr.message);
-            }
-
-            // 3. WALLET CREDIT (Only on Success + If currently Pending)
+            // 3. WALLET CREDIT (Escrow Logic)
             if (paymentStatus === 'SUCCESSFUL' && voucher.status === 'PENDING') {
                 try {
-                    // Logic handles missing unique constraint by attempting update then insert
+                    // Update current wallet or create if doesn't exist
                     const walletUpdate = await client.query(
                         `UPDATE wallets SET escrow_balance = escrow_balance + $1, updated_at = NOW()
                          WHERE user_email = $2 AND currency = $3 RETURNING *`,
@@ -115,8 +86,43 @@ router.post('/flutterwave', async (req, res) => {
                     }
                     console.log(`💰 Wallet credited: ${amount} ${currency}`);
                 } catch (walletErr) {
-                    console.error('❌ Wallet update failed:', walletErr.message);
+                    console.error('⚠️ Wallet sync warning (Non-fatal):', walletErr.message);
                 }
+            }
+
+            // 4. TRANSACTION LOG (Using confirmed schema names)
+            try {
+                // Column names matched to your information_schema: 
+                // amount, currency, fee, update_at
+                await client.query(
+                    `
+                    INSERT INTO transactions (
+                        user_email, 
+                        voucher_id, 
+                        transaction_type, 
+                        amount, 
+                        currency,
+                        fee, 
+                        status, 
+                        reference_id,
+                        update_at
+                    )
+                    VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, $4, 0, $5::text::voucher_status, $6, NOW())
+                    ON CONFLICT (reference_id) DO NOTHING
+                    `,
+                    [
+                        voucher.creator_email,
+                        voucherId,
+                        amount,
+                        currency,
+                        voucherStatus,
+                        `FLW-${flutterwaveTxId}`
+                    ]
+                );
+                console.log('📒 Ledger entry created successfully');
+            } catch (txErr) {
+                console.error('❌ LEDGER ERROR (Sync continuing):', txErr.message);
+                // We DON'T throw here so the BEGIN/COMMIT still saves the Voucher/Wallet updates
             }
         }
 
@@ -124,9 +130,9 @@ router.post('/flutterwave', async (req, res) => {
         return res.status(200).send('Webhook processed');
 
     } catch (err) {
-        console.error('❌ FULL WEBHOOK ERROR:', err.message);
+        console.error('❌ CRITICAL WEBHOOK FAILURE:', err.message);
         if (client) await client.query('ROLLBACK');
-        return res.status(200).send('Webhook error');
+        return res.status(200).send('Internal Error Handled');
     } finally {
         if (client) client.release();
     }

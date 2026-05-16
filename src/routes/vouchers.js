@@ -7,7 +7,6 @@ const OWNER_EMAIL = 'deepxverified@gmail.com';
 
 /**
  * 1. CREATE VOUCHER
- * Stripped of USD conversion for maximum stability.
  */
 router.post('/create', async (req, res) => {
     const { 
@@ -20,15 +19,13 @@ router.post('/create', async (req, res) => {
     }
 
     try {
-        const userCheck = await query("SELECT kyc_tier FROM users WHERE email = $1", [creator_email]);
+        const userCheck = await query("SELECT kyc_tier FROM public.users WHERE email = $1", [creator_email]);
         const user = userCheck.rows[0];
 
         if (!user) return res.status(404).json({ error: "Creator account not found." });
         if (user.kyc_tier < 1) return res.status(403).json({ error: "KYC Tier 1 required." });
 
-        // Using a 1:1 value for usd_equivalent to satisfy DB schema without external calls
         const usdValue = amount; 
-        
         const rawKey = crypto.randomBytes(8).toString('hex');
         const hashedKey = crypto.createHash('sha256').update(rawKey).digest('hex');
         const voucherId = `VC-${crypto.randomInt(100000, 999999)}`;
@@ -37,12 +34,12 @@ router.post('/create', async (req, res) => {
         expiresAt.setDate(expiresAt.getDate() + 14); 
 
         await query(
-            `INSERT INTO vouchers (
+            `INSERT INTO public.vouchers (
                 id, creator_email, recipient_email, recipient_name, 
                 amount, currency, usd_equivalent, status, 
                 release_key_hash, expires_at, description, category
             ) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING'::voucher_status, $8, $9, $10, $11)`,
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING'::text::voucher_status, $8, $9, $10, $11)`,
             [
                 voucherId, creator_email, recipient_email, recipient_name, 
                 amount, currency, usdValue, hashedKey, 
@@ -55,7 +52,7 @@ router.post('/create', async (req, res) => {
             voucher_code: voucherId, 
             ref_id: voucherId,
             releaseKey: rawKey, 
-            message: `Voucher created successfully in ${currency}.`
+            message: `Voucher created successfully.`
         });
     } catch (err) {
         console.error("Voucher Creation Error:", err.message);
@@ -70,8 +67,8 @@ router.get('/:id', async (req, res) => {
     try {
         const result = await query(
             `SELECT v.*, u.full_name AS creator_name, u.country_name AS creator_country
-             FROM vouchers v
-             LEFT JOIN users u ON v.creator_email = u.email
+             FROM public.vouchers v
+             LEFT JOIN public.users u ON v.creator_email = u.email
              WHERE v.id = $1`, 
             [req.params.id]
         );
@@ -93,12 +90,13 @@ router.post('/release', async (req, res) => {
     try {
         client = await getClient();
         await client.query('BEGIN');
+        await client.query('SET search_path TO public');
 
         const vResult = await client.query("SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", [voucher_id]);
         const v = vResult.rows[0];
 
         if (!v) throw new Error("Voucher not found.");
-        if (v.status !== 'LOCKED') throw new Error(`Funds are currently ${v.status}. Payment must be verified before release.`);
+        if (v.status !== 'LOCKED') throw new Error(`Funds are currently ${v.status}. Payment must be verified.`);
 
         if (releaseKey) {
             const hashedInput = crypto.createHash('sha256').update(releaseKey).digest('hex');
@@ -109,7 +107,7 @@ router.post('/release', async (req, res) => {
         const fee = parseFloat((amount * 0.07).toFixed(4)); 
         const netAmount = amount - fee;
 
-        // 1. Deduct from CREATOR's Escrow
+        // 1. Deduct from CREATOR's Escrow (Fixed column updated_at)
         await client.query(
             "UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
             [amount, v.creator_email, v.currency]
@@ -135,18 +133,21 @@ router.post('/release', async (req, res) => {
             [OWNER_EMAIL, fee, v.currency]
         );
 
-        // 4. Update Voucher Status
-        await client.query("UPDATE vouchers SET status = 'RELEASED'::voucher_status, updated_at = NOW() WHERE id = $1", [v.id]);
+        // 4. Update Voucher Status (Using Enum Safety)
+        await client.query(
+            "UPDATE vouchers SET status = 'RELEASED'::text::voucher_status, updated_at = NOW() WHERE id = $1", 
+            [v.id]
+        );
 
-        // 5. Log Audit Transaction
+        // 5. Log Audit Transaction (Aligned with your schema column names: amount, fee, status)
         await client.query(`
-            INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, fee, status) 
-            VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, $5, 'SUCCESSFUL'::voucher_status)`,
-            [v.creator_email, v.id, netAmount, v.currency, fee]
+            INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, fee, status, reference_id) 
+            VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, $5, 'SUCCESSFUL'::text::voucher_status, $6)`,
+            [v.creator_email, v.id, netAmount, v.currency, fee, `REL-${v.id}`]
         );
 
         await client.query('COMMIT');
-        res.json({ success: true, message: "Funds moved to available balance." });
+        res.json({ success: true, message: "Funds released to balance." });
 
     } catch (e) {
         if (client) await client.query('ROLLBACK');
@@ -164,7 +165,7 @@ router.post('/dispute', async (req, res) => {
     const { voucher_id, reason } = req.body;
     try {
         await query(
-            "UPDATE vouchers SET status = 'DISPUTED'::voucher_status, description = $1, updated_at = NOW() WHERE id = $2",
+            "UPDATE public.vouchers SET status = 'DISPUTED'::text::voucher_status, description = $1, updated_at = NOW() WHERE id = $2",
             [reason || "User initiated dispute", voucher_id]
         );
         res.json({ success: true, message: "Funds frozen." });
