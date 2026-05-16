@@ -8,33 +8,40 @@ const router = express.Router();
  * Endpoint: /api/webhooks/flutterwave
  */
 router.post('/flutterwave', async (req, res) => {
+    // 1. Authenticate the Webhook
     const secretHash = process.env.FLW_SECRET_HASH;
     const signature = req.headers['verif-hash'];
 
-    // 1. Verify the authenticity of the webhook
-    if (!signature || signature !== secretHash) {
-        return res.status(401).end(); 
+    if (!secretHash || signature !== secretHash) {
+        console.warn("⚠️ Webhook Warning: Invalid or missing verif-hash.");
+        // We return 200 to prevent Flutterwave from retrying an unauthenticated request
+        return res.status(200).send('Unauthorized');
     }
 
     const payload = req.body;
     let client;
 
     try {
+        if (!payload || !payload.data) {
+            return res.status(200).send('No data payload');
+        }
+
         client = await getClient();
         await client.query('BEGIN');
 
         /**
-         * SCENARIO A: DEPOSIT (User pays for the Voucher)
-         * Funds enter your FLW Merchant Account.
-         * Action: Increment user's ESCROW_BALANCE.
+         * SCENARIO A: DEPOSIT (User pays to fund a Voucher)
+         * Event: 'charge.completed'
          */
         if (payload.event === 'charge.completed') {
             const voucherId = payload.data.tx_ref; 
-            const flwStatus = payload.data.status.toUpperCase(); 
+            const flwStatus = payload.data.status.toUpperCase(); // SUCCESSFUL
             const amountPaid = payload.data.amount;
             const currency = payload.data.currency;
             
-            // Lock the voucher row for update to prevent concurrent race conditions
+            console.log(`[Webhook] Processing Payment: ${voucherId} | Status: ${flwStatus}`);
+
+            // Lock the voucher row
             const result = await client.query(
                 "SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", 
                 [voucherId]
@@ -42,6 +49,7 @@ router.post('/flutterwave', async (req, res) => {
             const v = result.rows[0];
 
             if (v) {
+                // Determine target status
                 const targetStatus = (flwStatus === 'SUCCESSFUL') ? 'LOCKED' : 'FAILED';
 
                 // Update Voucher Status
@@ -50,9 +58,9 @@ router.post('/flutterwave', async (req, res) => {
                     [targetStatus, voucherId]
                 );
 
-                // Only update ledger if it's a new successful payment for a PENDING voucher
+                // Only update ledger if it's a new SUCCESSFUL payment for a PENDING voucher
                 if (flwStatus === 'SUCCESSFUL' && v.status === 'PENDING') {
-                    // Update Internal Wallet: Increase Escrow
+                    // 1. Update Wallet: Increase Escrow Balance
                     await client.query(`
                         INSERT INTO wallets (user_email, escrow_balance, available_balance, currency) 
                         VALUES ($1, $2, 0, $3)
@@ -63,27 +71,30 @@ router.post('/flutterwave', async (req, res) => {
                         [v.creator_email, amountPaid, currency]
                     );
 
-                    // Log the Escrow Deposit Transaction
+                    // 2. Log Transaction: Using amount_usd and fee_usd as per your schema
+                    // Note: fee_usd is 0 here as the 7% fee is only taken during 'release'
                     await client.query(`
                         INSERT INTO transactions (
-                            user_email, voucher_id, transaction_type, amount_usd, status, reference_id, currency
-                        ) VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, 'SUCCESSFUL'::voucher_status, $4, $5)`,
-                        [v.creator_email, v.id, amountPaid, `FLW-CHG-${payload.data.id}`, currency]
+                            user_email, voucher_id, transaction_type, amount_usd, fee_usd, status, reference_id, currency
+                        ) VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, 0, 'SUCCESSFUL'::voucher_status, $4, $5)`,
+                        [v.creator_email, v.id, amountPaid, `FLW-${payload.data.id}`, currency]
                     );
+                    
+                    console.log(`✅ Ledger Updated: ${amountPaid} ${currency} added to Escrow for ${v.creator_email}`);
                 }
+            } else {
+                console.error(`❌ DB Error: Voucher ID ${voucherId} not found.`);
             }
         }
 
         /**
          * SCENARIO B: WITHDRAWAL (Flutterwave Transfer API)
-         * Funds leave your FLW Merchant Account to user's bank.
-         * Action: Finalize deduction or REVERSE if bank transfer fails.
+         * Event: 'transfer.completed'
          */
         if (payload.event === 'transfer.completed') {
             const { reference, status, amount, currency } = payload.data;
             const finalStatus = status.toUpperCase(); 
 
-            // Find the original internal transaction created by withdraw.js
             const txResult = await client.query(
                 "SELECT * FROM transactions WHERE reference_id = $1",
                 [reference]
@@ -91,17 +102,14 @@ router.post('/flutterwave', async (req, res) => {
             const originalTx = txResult.rows[0];
 
             if (originalTx) {
-                // 1. Update the original transaction status (flipping from PROCESSING to result)
+                // Update original transaction status
                 await client.query(
                     "UPDATE transactions SET status = $1::voucher_status, updated_at = NOW() WHERE reference_id = $2",
                     [finalStatus, reference]
                 );
 
-                if (finalStatus === 'SUCCESSFUL') {
-                    console.log(`✅ Withdrawal Settled: ${amount} ${currency} for ${originalTx.user_email}`);
-                } 
-                else if (finalStatus === 'FAILED' || finalStatus === 'REJECTED') {
-                    // Transfer failed at the bank level. Refund the user's available balance.
+                if (finalStatus === 'FAILED' || finalStatus === 'REJECTED') {
+                    // Refund the user's available balance
                     await client.query(`
                         UPDATE wallets SET 
                             available_balance = available_balance + $1,
@@ -110,28 +118,26 @@ router.post('/flutterwave', async (req, res) => {
                         [parseFloat(amount), originalTx.user_email, currency]
                     );
 
-                    // Log the reversal for the user's history
+                    // Log the reversal
                     await client.query(`
                         INSERT INTO transactions (
-                            user_email, transaction_type, amount_usd, status, reference_id, currency
-                        ) VALUES ($1, 'WITHDRAWAL_REVERSAL', $2, 'SUCCESSFUL'::voucher_status, $3, $4)`,
-                        [originalTx.user_email, amount, `REF-${reference}`, currency]
+                            user_email, transaction_type, amount_usd, fee_usd, status, reference_id, currency
+                        ) VALUES ($1, 'WITHDRAWAL_REVERSAL', $2, 0, 'SUCCESSFUL'::voucher_status, $3, $4)`,
+                        [originalTx.user_email, amount, `REV-${reference}`, currency]
                     );
                     
-                    console.log(`↺ Withdrawal Failed: ${amount} ${currency} refunded to ${originalTx.user_email}`);
+                    console.log(`↺ Withdrawal Reversed: ${amount} ${currency} returned to ${originalTx.user_email}`);
                 }
             }
         }
 
         await client.query('COMMIT');
-        // Flutterwave requires a 200 OK response to stop retrying the webhook
-        res.status(200).send('Webhook Processed');
+        res.status(200).send('OK');
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
-        console.error("⚠️ Webhook Error:", err.message);
-        // We still send 200 so Flutterwave doesn't bombard the server if it's a logic error
-        res.status(200).send('Error Handled'); 
+        console.error("⚠️ Webhook Processing Error:", err.message);
+        res.status(200).send('Error Processed'); 
     } finally {
         if (client) client.release();
     }
