@@ -1,28 +1,33 @@
 import axios from 'axios';
 
-// Simple in-memory cache to store rates for 10 minutes to speed up the UI
+// Simple in-memory cache to store rates for 10 minutes
 const rateCache = new Map();
 const CACHE_DURATION = 10 * 60 * 1000; 
 
 /**
  * Converts any currency amount using Flutterwave's official merchant rates.
+ * Use this only when a user explicitly requests an exchange or a cross-currency withdrawal.
  */
 export const convertCurrency = async (amount, fromCurrency, toCurrency = 'USD') => {
+    // 1. Basic Validation
+    if (!amount || isNaN(amount) || parseFloat(amount) === 0) return 0;
+    
     const from = fromCurrency.toUpperCase();
     const to = toCurrency.toUpperCase();
 
     if (from === to) return parseFloat(amount);
 
+    // 2. Check Cache
     const cacheKey = `${from}_${to}`;
     const cached = rateCache.get(cacheKey);
 
-    // If we have a fresh rate (less than 10 mins old), use it to calculate
     if (cached && (Date.now() - cached.timestamp < CACHE_DURATION)) {
         return parseFloat((amount * cached.rate).toFixed(2));
     }
 
     try {
-        // Call Flutterwave's Rates API
+        // 3. Call Flutterwave's Rates API
+        // Note: amount is passed to FLW to get the exact destination total including their precision
         const url = `https://api.flutterwave.com/v3/transfers/rates?amount=${amount}&destination_currency=${to}&source_currency=${from}`;
 
         const response = await axios.get(url, {
@@ -35,7 +40,7 @@ export const convertCurrency = async (amount, fromCurrency, toCurrency = 'USD') 
             const result = response.data.data.destination_amount;
             const rate = response.data.data.rate;
 
-            // Store the rate for future use
+            // 4. Update Cache for future calls
             rateCache.set(cacheKey, {
                 rate: rate,
                 timestamp: Date.now()
@@ -43,17 +48,20 @@ export const convertCurrency = async (amount, fromCurrency, toCurrency = 'USD') 
 
             return result;
         } else {
-            throw new Error("Invalid response from Flutterwave Rates API");
+            throw new Error("Invalid response from Flutterwave");
         }
     } catch (error) {
         const errorMsg = error.response?.data?.message || error.message;
-        console.error("❌ Converter Utility Error:", errorMsg);
+        console.error("❌ Currency Exchange Error:", errorMsg);
         
-        // If FLW API is down, we absolutely should not guess the rate.
-        throw new Error(`Currency conversion failed: ${errorMsg}`);
+        // Critical: We throw the error so the UI doesn't process a transaction with a 'fake' rate.
+        throw new Error(`Exchange rate unavailable: ${errorMsg}`);
     }
 };
 
+/**
+ * Helper for internal USD ledger checks if needed in the future.
+ */
 export const convertToUSD = (amount, fromCurrency) => convertCurrency(amount, fromCurrency, 'USD');
 
 export default { convertCurrency, convertToUSD };

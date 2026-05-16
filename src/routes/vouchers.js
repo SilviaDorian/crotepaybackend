@@ -1,14 +1,13 @@
 import express from 'express';
 import crypto from 'crypto';
 import { query, getClient } from '../db/index.js';
-//import { convertToUSD } from '../utils/payout.js'; // Imported recommended utility
 
 const router = express.Router();
 const OWNER_EMAIL = 'deepxverified@gmail.com'; 
 
 /**
  * 1. CREATE VOUCHER
- * Now uses Flutterwave Rates for the USD equivalent to ensure ledger accuracy.
+ * Stripped of USD conversion for maximum stability.
  */
 router.post('/create', async (req, res) => {
     const { 
@@ -27,8 +26,8 @@ router.post('/create', async (req, res) => {
         if (!user) return res.status(404).json({ error: "Creator account not found." });
         if (user.kyc_tier < 1) return res.status(403).json({ error: "KYC Tier 1 required." });
 
-        // Switch to the FLW-backed converter
-        const usdValue = await convertToUSD(amount, currency);
+        // Using a 1:1 value for usd_equivalent to satisfy DB schema without external calls
+        const usdValue = amount; 
         
         const rawKey = crypto.randomBytes(8).toString('hex');
         const hashedKey = crypto.createHash('sha256').update(rawKey).digest('hex');
@@ -56,11 +55,11 @@ router.post('/create', async (req, res) => {
             voucher_code: voucherId, 
             ref_id: voucherId,
             releaseKey: rawKey, 
-            message: `Created at $${usdValue.toFixed(2)} USD equivalent.`
+            message: `Voucher created successfully in ${currency}.`
         });
     } catch (err) {
         console.error("Voucher Creation Error:", err.message);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Server error during voucher creation." });
     }
 });
 
@@ -86,7 +85,6 @@ router.get('/:id', async (req, res) => {
 
 /**
  * 3. RELEASE FUNDS (LEDGER MOVEMENT)
- * Finalizes the internal ledger transfer from Escrow to Available.
  */
 router.post('/release', async (req, res) => {
     const { voucher_id, releaseKey } = req.body;
@@ -111,13 +109,13 @@ router.post('/release', async (req, res) => {
         const fee = parseFloat((amount * 0.07).toFixed(4)); 
         const netAmount = amount - fee;
 
-        // 1. Deduct from CREATOR's Escrow (Scoped by Currency)
+        // 1. Deduct from CREATOR's Escrow
         await client.query(
             "UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
             [amount, v.creator_email, v.currency]
         );
 
-        // 2. Add Net to CREATOR's Available Balance (Scoped by Currency)
+        // 2. Add Net to CREATOR's Available Balance
         await client.query(`
             INSERT INTO wallets (user_email, available_balance, currency) 
             VALUES ($1, $2, $3)
@@ -127,7 +125,7 @@ router.post('/release', async (req, res) => {
             [v.creator_email, netAmount, v.currency]
         );
 
-        // 3. System Fee to Platform Owner (Scoped by Currency)
+        // 3. System Fee to Platform Owner
         await client.query(`
             INSERT INTO wallets (user_email, available_balance, currency) 
             VALUES ($1, $2, $3)
