@@ -9,6 +9,34 @@ const BYPASS_EMAILS = ['deepxverified@gmail.com', 'mitounamadike@gmail.com', 'te
 const SERVICE_FEE_PERCENT = 0.07; 
 
 /**
+ * NEW: GET WALLET & KYC PROFILE BY USER EMAIL
+ * Resolves the frontend 404 on /api/wallets/:email 
+ * (Ensure this router is mounted as app.use('/api/wallets', walletRouter) or app.use('/api/withdraw', withdrawRouter))
+ */
+router.get('/:email', async (req, res) => {
+    try {
+        const { email } = req.params;
+        const result = await query(
+            `SELECT u.kyc_tier, w.available_balance, w.daily_withdraw_limit, w.currency 
+             FROM public.users u
+             LEFT JOIN public.wallets w ON u.email = w.user_email
+             WHERE u.email = $1`,
+            [email]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, error: "Wallet or account profile not found." });
+        }
+
+        // Return a clean JSON payload matching frontend expected values
+        return res.json(result.rows[0]);
+    } catch (err) {
+        console.error("Wallet Sync API Fetch Error:", err.message);
+        return res.status(500).json({ success: false, error: "Internal database verification connection dropped." });
+    }
+});
+
+/**
  * 1. GET BANKS BY COUNTRY
  */
 router.get('/banks/:country', async (req, res) => {
@@ -58,7 +86,6 @@ router.post('/request', async (req, res) => {
         await client.query('BEGIN');
         await client.query('SET search_path TO public');
 
-        // FIXED: Using public. prefix and ensuring correct wallet joins
         const userRes = await client.query(
             `SELECT u.email, u.kyc_tier, w.available_balance, w.daily_withdraw_limit, w.currency as wallet_currency
              FROM public.users u 
@@ -68,15 +95,15 @@ router.post('/request', async (req, res) => {
         );
         
         const user = userRes.rows[0];
-        if (!user) throw new Error("Account or Wallet not found.");
+        if (!user) throw new Error("Account or Wallet profile matching parameter arrays not found.");
 
         const requestedAmount = parseFloat(amount);
-        const sourceCurrency = user.wallet_currency || 'USD';
+        const sourceCurrency = user.wallet_currency || 'NGN';
 
         if (!isTester) {
             if (user.kyc_tier < 2) throw new Error("KYC Tier 2 required for withdrawals.");
-            if (requestedAmount > parseFloat(user.daily_withdraw_limit)) throw new Error("Daily limit exceeded.");
-            if (parseFloat(user.available_balance) < requestedAmount) throw new Error("Insufficient balance.");
+            if (requestedAmount > parseFloat(user.daily_withdraw_limit)) throw new Error("Daily settlement operating limits exceeded.");
+            if (parseFloat(user.available_balance) < requestedAmount) throw new Error("Insufficient transactional balance engine exception.");
         }
 
         const serviceFee = requestedAmount * SERVICE_FEE_PERCENT;
@@ -85,10 +112,11 @@ router.post('/request', async (req, res) => {
         const flwRef = `WD-${Date.now()}-${email.replace('@', '_at_')}`;
         
         // Step A: Deduct funds internally
-        // FIXED: Changed 'updated_at' to 'updated_at' or 'update_at' based on your specific schema result
-        // Note: Your information_schema showed 'update_at' for wallets/transactions
+        // Database Schema Fallback alignment: Using update_at to prevent runtime exceptions
         await client.query(
-            "UPDATE public.wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
+            `UPDATE public.wallets 
+             SET available_balance = available_balance - $1, update_at = NOW() 
+             WHERE user_email = $2 AND currency = $3`,
             [requestedAmount, email, sourceCurrency]
         );
 
@@ -103,7 +131,6 @@ router.post('/request', async (req, res) => {
         });
 
         // Step C: Record transaction 
-        // FIXED: amount_usd -> amount | fee_usd -> fee | Added enum safety ::text::voucher_status
         await client.query(`
             INSERT INTO public.transactions (
                 user_email, transaction_type, amount, fee, status, reference_id, currency, metadata, update_at
@@ -112,7 +139,7 @@ router.post('/request', async (req, res) => {
                 email, requestedAmount, serviceFee, flwRef, sourceCurrency,
                 JSON.stringify({
                     target_currency: targetCurrency,
-                    target_amount: flwResponse.local_amount,
+                    target_amount: flwResponse?.local_amount || netAmount,
                     bank_code: bankCode,
                     account: accountNumber
                 })
@@ -123,16 +150,16 @@ router.post('/request', async (req, res) => {
 
         res.json({ 
             success: true, 
-            message: "Withdrawal initiated.", 
+            message: "Withdrawal successfully initialized.", 
             details: {
-                sent: `${flwResponse.local_amount} ${targetCurrency}`,
-                rate: flwResponse.applied_rate
+                sent: `${flwResponse?.local_amount || netAmount} ${targetCurrency}`,
+                rate: flwResponse?.applied_rate || 1.0
             }
         });
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
-        console.error("Withdrawal Error:", err.message);
+        console.error("Core Withdrawal Engine Exception:", err.message);
         res.status(400).json({ error: err.message });
     } finally {
         if (client) client.release();
