@@ -179,7 +179,7 @@ router.post('/release', async (req, res) => {
         );
 
         await client.query('COMMIT');
-        res.json({ success: true, message: "Funds released to balance." });
+        res.json({ success: true, message: "Funds are released to balance." });
 
     } catch (e) {
         if (client) await client.query('ROLLBACK');
