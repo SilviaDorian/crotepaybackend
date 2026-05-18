@@ -22,14 +22,12 @@ router.post('/flutterwave', async (req, res) => {
     try {
         client = await getClient();
         await client.query('BEGIN');
-        // Ensure we are targeting the public schema and the correct search path
         await client.query('SET search_path TO public');
 
         if (payload.event === 'charge.completed') {
             const voucherId = payload.data.tx_ref?.trim();
             const paymentStatus = payload.data.status?.toUpperCase() || 'FAILED';
             const amount = Number(payload.data.amount || 0);
-            const currency = payload.data.currency || 'NGN';
             const flutterwaveTxId = String(payload.data.id);
 
             console.log(`💳 WEBHOOK RECEIVED: ${voucherId} | STATUS: ${paymentStatus}`);
@@ -53,24 +51,32 @@ router.post('/flutterwave', async (req, res) => {
             }
 
             const voucher = voucherResult.rows[0];
+            
+            // Use fallback currency logic to keep tracking coherent
+            const currency = payload.data.currency || voucher.currency || 'NGN';
 
-            // MAP STATUS TO ENUM
+            // MAP STATUS TO EXPLICIT VOUCHER_STATUS ENUMS
             let voucherStatus = 'FAILED';
             if (paymentStatus === 'SUCCESSFUL') voucherStatus = 'LOCKED';
             else if (paymentStatus === 'PENDING') voucherStatus = 'PROCESSING';
             else if (paymentStatus === 'CANCELLED') voucherStatus = 'CANCELLED';
 
-            // 2. UPDATE VOUCHER (Primary Goal - Unblocks the "Syncing" UI)
+            // MAP STATUS TO EXPLICIT TRANSACTION_STATUS ENUMS
+            let transactionStatus = 'PENDING';
+            if (paymentStatus === 'SUCCESSFUL') transactionStatus = 'SUCCESSFUL';
+            else if (paymentStatus === 'FAILED') transactionStatus = 'FAILED';
+
+            // 2. UPDATE VOUCHER (This unblocks the UI polling logic)
             await client.query(
                 `UPDATE vouchers SET status = $1::text::voucher_status, updated_at = NOW() WHERE id = $2`,
                 [voucherStatus, voucherId]
             );
             console.log(`✅ Voucher status updated to: ${voucherStatus}`);
 
-            // 3. WALLET CREDIT (Escrow Logic)
+            // 3. VIRTUAL WALLET BALANCE UPDATE (Escrow Engine)
             if (paymentStatus === 'SUCCESSFUL' && voucher.status === 'PENDING') {
                 try {
-                    // Update current wallet or create if doesn't exist
+                    // Match unique constraint indexing exactly
                     const walletUpdate = await client.query(
                         `UPDATE wallets SET escrow_balance = escrow_balance + $1, updated_at = NOW()
                          WHERE user_email = $2 AND currency = $3 RETURNING *`,
@@ -79,21 +85,21 @@ router.post('/flutterwave', async (req, res) => {
 
                     if (walletUpdate.rowCount === 0) {
                         await client.query(
-                            `INSERT INTO wallets (user_email, escrow_balance, available_balance, currency)
-                             VALUES ($1, $2, 0, $3)`,
+                            `INSERT INTO wallets (user_email, escrow_balance, available_balance, currency, updated_at)
+                             VALUES ($1, $2, 0.0000, $3, NOW())`,
                             [voucher.creator_email, amount, currency]
                         );
                     }
-                    console.log(`💰 Wallet credited: ${amount} ${currency}`);
+                    console.log(`💰 Virtual Escrow Wallet Credited: ${amount} ${currency}`);
                 } catch (walletErr) {
-                    console.error('⚠️ Wallet sync warning (Non-fatal):', walletErr.message);
+                    console.error('⚠️ Wallet sync warning:', walletErr.message);
                 }
             }
 
-            // 4. TRANSACTION LOG (Using confirmed schema names)
+            // 4. TRANSACTION LOG
             try {
-                // Column names matched to your information_schema: 
-                // amount, currency, fee, update_at
+                // FIXED: Column changed from 'update_at' to 'updated_at'
+                // FIXED: Cast changed from 'voucher_status' to 'transaction_status'
                 await client.query(
                     `
                     INSERT INTO transactions (
@@ -105,9 +111,10 @@ router.post('/flutterwave', async (req, res) => {
                         fee, 
                         status, 
                         reference_id,
-                        update_at
+                        created_at,
+                        updated_at
                     )
-                    VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, $4, 0, $5::text::voucher_status, $6, NOW())
+                    VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, $4, 0, $5::text::transaction_status, $6, NOW(), NOW())
                     ON CONFLICT (reference_id) DO NOTHING
                     `,
                     [
@@ -115,14 +122,13 @@ router.post('/flutterwave', async (req, res) => {
                         voucherId,
                         amount,
                         currency,
-                        voucherStatus,
+                        transactionStatus,
                         `FLW-${flutterwaveTxId}`
                     ]
                 );
-                console.log('📒 Ledger entry created successfully');
+                console.log('📒 Ledger entry written successfully.');
             } catch (txErr) {
-                console.error('❌ LEDGER ERROR (Sync continuing):', txErr.message);
-                // We DON'T throw here so the BEGIN/COMMIT still saves the Voucher/Wallet updates
+                console.error('❌ LEDGER SQL COMPILATION ERROR:', txErr.message);
             }
         }
 
