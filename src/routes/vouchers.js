@@ -6,6 +6,37 @@ const router = express.Router();
 const OWNER_EMAIL = 'deepxverified@gmail.com'; 
 
 /**
+ * NEW: GET ALL VOUCHERS OR FILTER BY EMAIL
+ * Handles: GET /api/vouchers?email=user@example.com
+ */
+router.get('/', async (req, res) => {
+    const { email } = req.query;
+
+    try {
+        let result;
+        if (email) {
+            // Fetch records where the user is either the creator OR the recipient
+            result = await query(
+                `SELECT v.*, u.full_name AS creator_name 
+                 FROM public.vouchers v
+                 LEFT JOIN public.users u ON v.creator_email = u.email
+                 WHERE LOWER(v.creator_email) = LOWER($1) OR LOWER(v.recipient_email) = LOWER($1)
+                 ORDER BY v.created_at DESC`,
+                [email]
+            );
+        } else {
+            // Fallback for admin overview if no email query parameter is supplied
+            result = await query("SELECT * FROM public.vouchers ORDER BY created_at DESC");
+        }
+
+        res.json(result.rows);
+    } catch (err) {
+        console.error("Fetch Vouchers Error:", err.message);
+        res.status(500).json({ error: "Database error while fetching vouchers." });
+    }
+});
+
+/**
  * 1. CREATE VOUCHER
  */
 router.post('/create', async (req, res) => {
@@ -61,7 +92,8 @@ router.post('/create', async (req, res) => {
 });
 
 /**
- * 2. GET VOUCHER DETAILS
+ * 2. GET VOUCHER DETAILS BY UNIQUE ID
+ * Note: Placed below root route to avoid wildcard string capture interference
  */
 router.get('/:id', async (req, res) => {
     try {
@@ -107,7 +139,7 @@ router.post('/release', async (req, res) => {
         const fee = parseFloat((amount * 0.07).toFixed(4)); 
         const netAmount = amount - fee;
 
-        // 1. Deduct from CREATOR's Escrow (Fixed column updated_at)
+        // 1. Deduct from CREATOR's Escrow
         await client.query(
             "UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
             [amount, v.creator_email, v.currency]
@@ -133,13 +165,13 @@ router.post('/release', async (req, res) => {
             [OWNER_EMAIL, fee, v.currency]
         );
 
-        // 4. Update Voucher Status (Using Enum Safety)
+        // 4. Update Voucher Status
         await client.query(
             "UPDATE vouchers SET status = 'RELEASED'::text::voucher_status, updated_at = NOW() WHERE id = $1", 
             [v.id]
         );
 
-        // 5. Log Audit Transaction (Aligned with your schema column names: amount, fee, status)
+        // 5. Log Audit Transaction
         await client.query(`
             INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, fee, status, reference_id) 
             VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, $5, 'SUCCESSFUL'::text::voucher_status, $6)`,
