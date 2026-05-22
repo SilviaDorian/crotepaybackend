@@ -2,10 +2,19 @@ import axios from 'axios';
 
 /**
  * Triggers the bank payout via Flutterwave.
- * Handles both "Same-Currency" transfers and "Cross-Currency" conversions.
+ * Handles African local transfers, International wire payouts, and Cross-Currency conversions.
  */
 export const triggerBankTransfer = async (details) => {
-    const { amount, sourceCurrency, targetCurrency, bankCode, accountNumber, reference } = details;
+    const { 
+        amount, 
+        sourceCurrency, 
+        targetCurrency, 
+        bankCode, 
+        accountNumber, 
+        reference, 
+        isInternational, 
+        wirePayload 
+    } = details;
 
     try {
         let finalPayoutAmount = amount;
@@ -15,7 +24,7 @@ export const triggerBankTransfer = async (details) => {
         if (sourceCurrency !== targetCurrency) {
             console.log(`[PAYOUT] FX detected: Converting ${amount} ${sourceCurrency} to ${targetCurrency}`);
             
-            // Fetch the official rate from Flutterwave to ensure zero-loss for the merchant
+            // Fetch the official live rate from Flutterwave to ensure zero-loss execution
             const rateUrl = `https://api.flutterwave.com/v3/transfers/rates?amount=${amount}&destination_currency=${targetCurrency}&source_currency=${sourceCurrency}`;
             
             const rateResponse = await axios.get(rateUrl, {
@@ -32,18 +41,58 @@ export const triggerBankTransfer = async (details) => {
             console.log(`[PAYOUT] Native Lane: Sending ${amount} ${targetCurrency} directly.`);
         }
 
-        // --- 2. EXECUTE TRANSFER ---
-        const response = await axios.post(
-            'https://api.flutterwave.com/v3/transfers',
-            {
+        // --- 2. PAYLOAD BUILDER: Split Local vs International Wiring Structures ---
+        let flwPayload = {};
+
+        if (isInternational && wirePayload) {
+            console.log(`[PAYOUT] Processing International Wire payload for Ref: ${reference}`);
+            
+            // Standard formatting required by Flutterwave for SWIFT/Wire distributions
+            flwPayload = {
+                account_bank: '000', // Constant formatting fallback required by FLW for wire channels
+                account_number: wirePayload.account_number,
+                amount: finalPayoutAmount,
+                currency: targetCurrency,
+                debit_currency: sourceCurrency,
+                narration: `FielPay Global Settlement Ref: ${reference}`,
+                reference: reference,
+                beneficiary_name: wirePayload.beneficiary_name,
+                callback_url: `${process.env.BASE_URL}/api/webhooks/flutterwave`,
+                meta: [
+                    { first_name: wirePayload.beneficiary_name.split(' ')[0] || 'Client' },
+                    { last_name: wirePayload.beneficiary_name.split(' ')[1] || 'User' },
+                    { beneficiary_address: wirePayload.beneficiary_address },
+                    { beneficiary_country: wirePayload.beneficiary_country },
+                    { swift_code: wirePayload.swift_code },
+                    { bank_name: wirePayload.bank_name }
+                ]
+            };
+
+            // Conditionally append routing number for US/CA distributions if present
+            if (wirePayload.routing_number) {
+                flwPayload.meta.push({ routing_number: wirePayload.routing_number });
+            }
+
+        } else {
+            console.log(`[PAYOUT] Processing African Local payload for Ref: ${reference}`);
+            
+            // Traditional localized configuration payload
+            flwPayload = {
                 account_bank: bankCode,
                 account_number: accountNumber,
-                amount: finalPayoutAmount, // The amount in the local currency
-                currency: targetCurrency,   // e.g., 'NGN', 'USD', 'GHS'
+                amount: finalPayoutAmount,
+                currency: targetCurrency,
+                debit_currency: sourceCurrency,
                 reference: reference,
-                debit_currency: sourceCurrency, // The currency to deduct from your FLW balance
+                narration: `FielPay Payout Ref: ${reference}`,
                 callback_url: `${process.env.BASE_URL}/api/webhooks/flutterwave`
-            },
+            };
+        }
+
+        // --- 3. EXECUTE TRANSFER ---
+        const response = await axios.post(
+            'https://api.flutterwave.com/v3/transfers',
+            flwPayload,
             {
                 headers: { 
                     Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
@@ -52,10 +101,10 @@ export const triggerBankTransfer = async (details) => {
             }
         );
 
-        // --- 3. RETURN DATA ---
+        // --- 4. RETURN STANDARDIZED DATA OBJECT ---
         return {
             success: true,
-            flw_id: response.data.data.id,
+            flw_id: response.data?.data?.id,
             applied_rate: appliedRate,
             local_amount: finalPayoutAmount,
             source_amount: amount,
