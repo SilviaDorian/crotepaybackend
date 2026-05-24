@@ -1,401 +1,89 @@
 import express from 'express';
 import axios from 'axios';
+import { query } from '../db/index.js';
 
 const router = express.Router();
-
-const CONVERSION_FEE_PERCENT = 0.008; // 0.8%
-const CACHE_DURATION = 10 * 60 * 1000;
-
-const rateCache = new Map();
+const CONVERSION_FEE_PERCENT = 0.02; // 2% Fee
 
 /**
- * ============================================
- * GET EXCHANGE RATE
- * ============================================
+ * FETCH LIVE FLUTTERWAVE RATE
  */
-async function getExchangeRate(from, to, amount = 1) {
-
-    const cacheKey = `${from}_${to}`;
-
-    const cached = rateCache.get(cacheKey);
-
-    if (
-        cached &&
-        Date.now() - cached.timestamp < CACHE_DURATION
-    ) {
-        return cached.rate;
-    }
-
-    try {
-
-        const response = await axios.post(
-            'https://api.flutterwave.com/v3/transfers/rates',
-            {
-                source_currency: from,
-                destination_currency: to,
-                amount
-            },
-            {
-                headers: {
-                    Authorization:
-                        `Bearer ${process.env.FLW_SECRET_KEY}`
-                }
-            }
-        );
-
-        const rate = Number(
-            response.data?.data?.rate
-        );
-
-        if (!rate) {
-            throw new Error('Rate unavailable');
-        }
-
-        rateCache.set(cacheKey, {
-            rate,
-            timestamp: Date.now()
-        });
-
-        return rate;
-
-    } catch (err) {
-
-        console.error(err.message);
-
-        throw new Error('Failed to fetch rate');
-    }
+async function getLiveRate(from, to, amount) {
+    const response = await axios.post(
+        'https://api.flutterwave.com/v3/transfers/rates',
+        { source_currency: from, destination_currency: to, amount },
+        { headers: { Authorization: `Bearer ${process.env.FLW_SECRET_KEY}` } }
+    );
+    return Number(response.data?.data?.rate);
 }
 
-/**
- * ============================================
- * PREVIEW CONVERSION
- * ============================================
- */
-router.get('/preview', async (req, res) => {
-
-    try {
-
-        const {
-            amount,
-            from,
-            to
-        } = req.query;
-
-        const numericAmount = Number(amount);
-
-        if (!numericAmount || numericAmount <= 0) {
-            return res.status(400).json({
-                message:'Invalid amount'
-            });
-        }
-
-        const fee =
-            numericAmount *
-            CONVERSION_FEE_PERCENT;
-
-        const amountAfterFee =
-            numericAmount - fee;
-
-        const rate =
-            await getExchangeRate(
-                from,
-                to,
-                amountAfterFee
-            );
-
-        const convertedAmount =
-            Number(
-                (
-                    amountAfterFee * rate
-                ).toFixed(2)
-            );
-
-        return res.json({
-            amount:numericAmount,
-            fee,
-            amountAfterFee,
-            rate,
-            convertedAmount
-        });
-
-    } catch (err) {
-
-        console.error(err);
-
-        return res.status(500).json({
-            message:err.message
-        });
-    }
-});
-
-/**
- * ============================================
- * PROCESS CONVERSION
- * ============================================
- */
 router.post('/convert', async (req, res) => {
+    const { email, amount, fromCurrency, toCurrency } = req.body;
+    const numericAmount = parseFloat(amount);
+
+    if (!numericAmount || numericAmount <= 0) return res.status(400).json({ message: 'Invalid amount' });
 
     try {
-
-        const {
-            email,
-            amount,
-            fromCurrency,
-            toCurrency
-        } = req.body;
-
-        const numericAmount = Number(amount);
-
-        if (!numericAmount || numericAmount <= 0) {
-            return res.status(400).json({
-                message:'Invalid amount'
-            });
-        }
-
-        if (fromCurrency === toCurrency) {
-            return res.status(400).json({
-                message:'Currencies cannot match'
-            });
-        }
-
-        /**
-         * ====================================
-         * FETCH USER WALLETS
-         * ====================================
-         */
-
-        const walletResponse = await axios.get(
-            `${process.env.API_BASE_URL}/history/wallets?email=${email}`
+        // 1. Check Available Balance (Ignore Escrow)
+        const walletRes = await query(
+            "SELECT available_balance FROM public.wallets WHERE user_email = $1 AND currency = $2",
+            [email.toLowerCase().trim(), fromCurrency]
         );
 
-        const wallets = walletResponse.data;
-
-        /**
-         * SOURCE WALLET
-         */
-
-        const sourceWallet =
-            wallets.find(
-                w =>
-                    w.currency === fromCurrency
-            );
-
-        if (!sourceWallet) {
-
-            return res.status(404).json({
-                message:
-                    `${fromCurrency} wallet not found`
-            });
+        if (walletRes.rows.length === 0 || parseFloat(walletRes.rows[0].available_balance) < numericAmount) {
+            return res.status(400).json({ message: 'Insufficient available balance' });
         }
 
-        /**
-         * BALANCE CHECK
-         */
+        // 2. Fetch Live Rate
+        const rate = await getLiveRate(fromCurrency, toCurrency, numericAmount);
+        const fee = numericAmount * CONVERSION_FEE_PERCENT;
+        const netAmount = numericAmount - fee;
+        const convertedAmount = netAmount * rate;
 
-        if (
-            Number(sourceWallet.available_balance)
-            < numericAmount
-        ) {
-
-            return res.status(400).json({
-                message:'Insufficient balance'
-            });
-        }
-
-        /**
-         * CONVERSION CALCULATIONS
-         */
-
-        const fee =
-            numericAmount *
-            CONVERSION_FEE_PERCENT;
-
-        const amountAfterFee =
-            numericAmount - fee;
-
-        const rate =
-            await getExchangeRate(
-                fromCurrency,
-                toCurrency,
-                amountAfterFee
-            );
-
-        const convertedAmount =
-            Number(
-                (
-                    amountAfterFee * rate
-                ).toFixed(2)
-            );
-
-        /**
-         * ====================================
-         * UPDATE SOURCE WALLET
-         * ====================================
-         */
-
-        await axios.post(
-            `${process.env.API_BASE_URL}/wallet/update`,
-            {
-                email,
-                currency: fromCurrency,
-                available_balance:
-                    Number(
-                        sourceWallet.available_balance
-                    ) - numericAmount
-            }
+        // 3. Database Updates (Atomic Transaction)
+        await query('BEGIN');
+        
+        // Deduct source
+        await query(
+            "UPDATE public.wallets SET available_balance = available_balance - $1 WHERE user_email = $2 AND currency = $3",
+            [numericAmount, email.toLowerCase().trim(), fromCurrency]
         );
 
-        /**
-         * ====================================
-         * DESTINATION WALLET
-         * ====================================
-         */
+        // Credit destination (Upsert)
+        await query(`
+            INSERT INTO public.wallets (user_email, available_balance, currency)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_email, currency) 
+            DO UPDATE SET available_balance = public.wallets.available_balance + EXCLUDED.available_balance
+        `, [email.toLowerCase().trim(), convertedAmount, toCurrency]);
 
-        let destinationWallet =
-            wallets.find(
-                w =>
-                    w.currency === toCurrency
-            );
+        // Log transaction
+        await query(`
+            INSERT INTO public.transactions (user_email, transaction_type, amount, currency, status, created_at)
+            VALUES ($1, 'CONVERSION', $2, $3, 'SUCCESSFUL', NOW())
+        `, [email.toLowerCase().trim(), numericAmount, fromCurrency]);
 
-        /**
-         * CREATE DESTINATION WALLET
-         */
+        await query('COMMIT');
 
-        if (!destinationWallet) {
-
-            await axios.post(
-                `${process.env.API_BASE_URL}/wallet/create`,
-                {
-                    email,
-                    currency: toCurrency
-                }
-            );
-
-            destinationWallet = {
-                available_balance:0
-            };
-        }
-
-        /**
-         * CREDIT DESTINATION
-         */
-
-        await axios.post(
-            `${process.env.API_BASE_URL}/wallet/update`,
-            {
-                email,
-                currency: toCurrency,
-                available_balance:
-                    Number(
-                        destinationWallet.available_balance || 0
-                    ) + convertedAmount
-            }
-        );
-
-        /**
-         * ====================================
-         * SAVE TRANSACTION
-         * ====================================
-         */
-
-        await axios.post(
-            `${process.env.API_BASE_URL}/transactions/create`,
-            {
-                email,
-
-                type:'CONVERSION',
-
-                status:'SUCCESS',
-
-                from_currency:fromCurrency,
-
-                to_currency:toCurrency,
-
-                source_amount:numericAmount,
-
-                destination_amount:convertedAmount,
-
-                fee,
-
-                rate,
-
-                created_at:
-                    new Date().toISOString()
-            }
-        );
-
-        /**
-         * ====================================
-         * OPTIONAL FLUTTERWAVE TRANSFER
-         * ====================================
-         */
-
-        let flutterwaveTransfer = null;
-
+        // 4. Trigger Flutterwave Transfer Immediately
         try {
-
-            const flw =
-                await axios.post(
-                    'https://api.flutterwave.com/v3/transfers',
-                    {
-                        account_bank:'flutterwave',
-
-                        amount:convertedAmount,
-
-                        currency:toCurrency,
-
-                        narration:
-                            `${fromCurrency} to ${toCurrency} conversion`,
-
-                        reference:
-                            `conv_${Date.now()}`
-                    },
-                    {
-                        headers:{
-                            Authorization:
-                                `Bearer ${process.env.FLW_SECRET_KEY}`
-                        }
-                    }
-                );
-
-            flutterwaveTransfer =
-                flw.data;
-
-        } catch (err) {
-
-            console.error(
-                'Flutterwave Transfer Failed:',
-                err.message
-            );
+            await axios.post('https://api.flutterwave.com/v3/transfers', {
+                account_bank: 'flutterwave',
+                amount: convertedAmount,
+                currency: toCurrency,
+                reference: `conv_${Date.now()}`,
+                narration: `${fromCurrency} to ${toCurrency} conversion`
+            }, { headers: { Authorization: `Bearer ${process.env.FLW_SECRET_KEY}` } });
+        } catch (flwErr) {
+            console.error('Flutterwave Transfer Warning:', flwErr.message);
+            // Note: DB is already updated. Log error for reconciliation.
         }
 
-        /**
-         * SUCCESS RESPONSE
-         */
-
-        return res.json({
-
-            success:true,
-
-            conversion:{
-                amount:numericAmount,
-                fee,
-                amountAfterFee,
-                rate,
-                convertedAmount
-            },
-
-            flutterwaveTransfer
-        });
+        res.json({ success: true, convertedAmount, rate, fee });
 
     } catch (err) {
-
-        console.error(err);
-
-        return res.status(500).json({
-            success:false,
-            message:err.message
-        });
+        await query('ROLLBACK');
+        res.status(500).json({ message: "Conversion failed: " + err.message });
     }
 });
 
