@@ -14,7 +14,9 @@ router.get('/preview', async (req, res) => {
         const converted = (parseFloat(amount) - fee) * rate;
         res.json({ rate, fee, convertedAmount: converted });
     } catch (err) {
-        res.status(500).json({ error: "Rate unavailable" });
+        // Log the actual error to your server console
+        console.error("Flutterwave API Error:", err.response?.data || err.message);
+        res.status(500).json({ error: "Rate unavailable: " + (err.response?.data?.message || err.message) });
     }
 });
 
