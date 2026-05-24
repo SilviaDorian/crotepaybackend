@@ -12,6 +12,7 @@ import webhookRoutes from './routes/webhooks.js';
 import userRoutes from './routes/users.js';
 import voucherRoutes from './routes/vouchers.js';
 import adminRoutes from './routes/admin.js';
+import converterRoutes from './routes/converter.js';
 import withdrawRoutes from './routes/withdraw.js';
 
 dotenv.config();
@@ -51,6 +52,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/vouchers', voucherRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/withdraw', withdrawRoutes);
+app.use('/api/converter', converterRoutes);
 app.use('/api/history', historyRoutes);
 app.use('/api/revenue', revenueRoutes);
 
