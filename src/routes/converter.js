@@ -29,11 +29,33 @@ async function triggerFlutterwaveTransfer(amount, from, to, reference) {
     }
 }
 
+// GET /preview - Calculate conversion details
 router.get('/preview', async (req, res) => {
     const { amount, from, to } = req.query;
-    // ... your preview logic
+    const numericAmount = parseFloat(amount);
+    
+    if (!numericAmount || numericAmount <= 0) {
+        return res.status(400).json({ error: "Invalid amount" });
+    }
+
+    try {
+        const fee = numericAmount * CONVERSION_FEE_PERCENT;
+        const netAmount = numericAmount - fee;
+        const rate = await getLiveRate(from, to, netAmount);
+        const converted = netAmount * rate;
+        
+        res.json({ 
+            rate, 
+            fee, 
+            convertedAmount: converted 
+        });
+    } catch (err) {
+        console.error("Conversion Preview Error:", err.message);
+        res.status(500).json({ error: "Rate unavailable" });
+    }
 });
 
+// POST /convert - Execute conversion
 router.post('/convert', async (req, res) => {
     const { email, amount, fromCurrency, toCurrency } = req.body;
     const numericAmount = parseFloat(amount);
