@@ -45,7 +45,7 @@ router.post('/convert', async (req, res) => {
         await query(`INSERT INTO public.wallets (user_email, available_balance, currency) VALUES ($1, $2, $3) 
                      ON CONFLICT (user_email, currency) DO UPDATE SET available_balance = public.wallets.available_balance + EXCLUDED.available_balance`,
             [userEmail, convertedAmount, toCurrency]);
-        await query("INSERT INTO public.transactions (user_email, transaction_type, amount, currency, status) VALUES ($1, 'CONVERSION', $2, $3, 'SUCCESSFUL')",
+        await query("INSERT INTO public.transactions (user_email, transaction_status, amount, currency, status) VALUES ($1, 'CONVERSION', $2, $3, 'SUCCESSFUL')",
             [userEmail, numericAmount, fromCurrency]);
         await query('COMMIT');
 
