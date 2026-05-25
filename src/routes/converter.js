@@ -1,11 +1,9 @@
 import express from 'express';
 import { query } from '../db/index.js';
 import { getLiveRate } from '../utils/converterUtils.js';
-import cron from 'node-cron';
 
 const router = express.Router();
 const CONVERSION_FEE_PERCENT = 0.02;
-const OWNER_EMAIL = 'deepxverified@gmail.com';
 
 // Helper: Initiate Flutterwave Transfer
 async function triggerFlutterwaveTransfer(amount, from, to, reference) {
@@ -31,7 +29,11 @@ async function triggerFlutterwaveTransfer(amount, from, to, reference) {
     }
 }
 
-// POST /convert
+router.get('/preview', async (req, res) => {
+    const { amount, from, to } = req.query;
+    // ... your preview logic
+});
+
 router.post('/convert', async (req, res) => {
     const { email, amount, fromCurrency, toCurrency } = req.body;
     const numericAmount = parseFloat(amount);
@@ -73,25 +75,17 @@ router.post('/convert', async (req, res) => {
             
         await query('COMMIT');
 
-        // 4. Instantaneously send request to Flutterwave
+        // 4. Instant trigger
         triggerFlutterwaveTransfer(numericAmount, fromCurrency, toCurrency, reference)
             .then(flwRes => {
-                if (flwRes.status !== 'success') {
-                    console.error("Critical: Flutterwave transfer failed to initiate", flwRes);
-                    // Optionally: Update transaction status to 'FAILED_API' in DB here
-                }
+                if (flwRes.status !== 'success') console.error("FLW Failed:", flwRes);
             });
 
-        res.json({ success: true, message: "Conversion initiated. Funds are pending 3-day settlement." });
+        res.json({ success: true, message: "Conversion initiated." });
     } catch (err) {
         await query('ROLLBACK');
         res.status(500).json({ message: "Transaction failed: " + err.message });
     }
-});
-
-// Daily Cron Job (3-day settlement logic remains as discussed)
-cron.schedule('0 1 * * *', async () => {
-    // Reconciliation logic would go here, checking status of the 'reference'
 });
 
 export default router;

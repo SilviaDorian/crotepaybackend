@@ -4,7 +4,6 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import { query } from './db/index.js';
-import { startSettlementJob } from './jobs/reconciliation.js';
 
 // Import Routes
 import historyRoutes from './routes/history.js';
@@ -13,6 +12,7 @@ import webhookRoutes from './routes/webhooks.js';
 import userRoutes from './routes/users.js';
 import voucherRoutes from './routes/vouchers.js';
 import adminRoutes from './routes/admin.js';
+import cronRoutes from './routes/cron.js'; // The new trigger route
 import converterRoutes from './routes/converter.js';
 import withdrawRoutes from './routes/withdraw.js';
 
@@ -50,6 +50,7 @@ app.use('/api/withdraw', withdrawRoutes);
 app.use('/api/converter', converterRoutes);
 app.use('/api/history', historyRoutes);
 app.use('/api/revenue', revenueRoutes);
+app.use('/api/cron', cronRoutes); // Mounts the reconciliation trigger
 
 // --- 3. Status Route ---
 app.get('/', (req, res) => {
@@ -62,15 +63,7 @@ app.get('/', (req, res) => {
     });
 });
 
-// --- 4. Initialize Background Services ---
-try {
-    startSettlementJob();
-    console.log("✅ Settlement Reconciliation Job Initialized");
-} catch (err) {
-    console.error("❌ Failed to initialize Settlement Job:", err);
-}
-
-// --- 5. Cron Logic (Sync with ENUMs) ---
+// --- 4. Inline Cron Logic (Sync with ENUMs) ---
 app.get('/api/cron/cleanup', async (req, res) => {
     console.log("CRON: Auto-disputing expired vouchers...");
     try {
@@ -87,7 +80,7 @@ app.get('/api/cron/cleanup', async (req, res) => {
     }
 });
 
-// --- 6. Server Start ---
+// --- 5. Server Start ---
 if (process.env.NODE_ENV !== 'production') {
     const PORT = process.env.PORT || 4000;
     app.listen(PORT, '0.0.0.0', () => {

@@ -1,12 +1,13 @@
 {
-  "version": 2,
-  "builds": [
-    {
-      "src": "api/index.js",
-      "use": "@vercel/node"
-    }
-  ],
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index.js" }
+    { "source": "/api/(.*)", "destination": "/index.js" },
+    { "source": "/(.*)", "destination": "/index.js" }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/reconcile",
+      "schedule": "0 1 * * *"
+    }
   ]
 }
