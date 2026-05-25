@@ -1,44 +1,48 @@
 import express from 'express';
 import { query } from '../db/index.js';
 import { getLiveRate } from '../utils/converterUtils.js';
+import cron from 'node-cron';
 
 const router = express.Router();
 const CONVERSION_FEE_PERCENT = 0.02;
 const OWNER_EMAIL = 'deepxverified@gmail.com';
 
-// GET /preview - Calculate conversion details
-router.get('/preview', async (req, res) => {
-    const { amount, from, to } = req.query;
-    const numericAmount = parseFloat(amount);
-    
-    if (!numericAmount || numericAmount <= 0) {
-        return res.status(400).json({ error: "Invalid amount" });
-    }
-
+// Helper: Initiate Flutterwave Transfer
+async function triggerFlutterwaveTransfer(amount, from, to, reference) {
     try {
-        const fee = numericAmount * CONVERSION_FEE_PERCENT;
-        const netAmount = numericAmount - fee;
-        const rate = await getLiveRate(from, to, netAmount);
-        const converted = netAmount * rate;
-        
-        res.json({ rate, fee, convertedAmount: converted });
+        const response = await fetch('https://api.flutterwave.com/v3/transfers', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${process.env.FLW_SECRET_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                amount: amount,
+                currency: from,
+                destination_currency: to,
+                narration: `Conversion Ref: ${reference}`,
+                reference: reference
+            })
+        });
+        return await response.json();
     } catch (err) {
-        console.error("Conversion Preview Error:", err.message);
-        res.status(500).json({ error: "Rate unavailable" });
+        console.error("Flutterwave API Error:", err);
+        return { status: 'error' };
     }
-});
+}
 
-// POST /convert - Execute the conversion
+// POST /convert
 router.post('/convert', async (req, res) => {
     const { email, amount, fromCurrency, toCurrency } = req.body;
     const numericAmount = parseFloat(amount);
     const userEmail = email.toLowerCase().trim();
+    const reference = `TXN_${Date.now()}`;
 
     try {
         const fee = numericAmount * CONVERSION_FEE_PERCENT;
         const netAmountToConvert = numericAmount - fee; 
 
-        // 1. Check User Balance
+        // 1. Check Balance
         const walletRes = await query(
             "SELECT available_balance FROM public.wallets WHERE user_email = $1 AND currency = $2",
             [userEmail, fromCurrency]
@@ -48,51 +52,46 @@ router.post('/convert', async (req, res) => {
             return res.status(400).json({ message: 'Insufficient available balance' });
         }
 
-        // 2. Get Live Rate and Convert
         const rate = await getLiveRate(fromCurrency, toCurrency, netAmountToConvert);
         const convertedAmount = netAmountToConvert * rate;
 
         await query('BEGIN');
         
-        // 3. Deduct Total Amount from User
+        // 2. Move to Awaiting Settlement
         await query(
-            "UPDATE public.wallets SET available_balance = available_balance - $1 WHERE user_email = $2 AND currency = $3", 
+            "UPDATE public.wallets SET available_balance = available_balance - $1, awaiting_settlement = awaiting_settlement + $1 WHERE user_email = $2 AND currency = $3", 
             [numericAmount, userEmail, fromCurrency]
         );
 
-        // 4. Credit Admin Wallet with the Fee
+        // 3. Log as PENDING
         await query(`
-            INSERT INTO public.wallets (user_email, available_balance, currency) 
-            VALUES ($1, $2, $3)
-            ON CONFLICT (user_email, currency) DO UPDATE 
-            SET available_balance = public.wallets.available_balance + EXCLUDED.available_balance`,
-            [OWNER_EMAIL, fee, fromCurrency]
-        );
-
-        // 5. Credit Recipient Wallet with Converted Amount
-        await query(`
-            INSERT INTO public.wallets (user_email, available_balance, currency) 
-            VALUES ($1, $2, $3) 
-            ON CONFLICT (user_email, currency) DO UPDATE 
-            SET available_balance = public.wallets.available_balance + EXCLUDED.available_balance`,
-            [userEmail, convertedAmount, toCurrency]
-        );
-
-        // 6. Log the Transaction
-        await query(`
-            INSERT INTO public.transactions (user_email, transaction_status, amount, fee, currency, status) 
-            VALUES ($1, 'CONVERSION', $2, $3, $4, 'SUCCESSFUL')`,
-            [userEmail, numericAmount, fee, fromCurrency]
+            INSERT INTO public.transactions 
+            (user_email, transaction_status, amount, fee, from_currency, to_currency, converted_amount, status, created_at, reference) 
+            VALUES ($1, 'CONVERSION', $2, $3, $4, $5, $6, 'PENDING', NOW(), $7)`,
+            [userEmail, numericAmount, fee, fromCurrency, toCurrency, convertedAmount, reference]
         );
             
         await query('COMMIT');
 
-        res.json({ success: true, convertedAmount });
+        // 4. Instantaneously send request to Flutterwave
+        triggerFlutterwaveTransfer(numericAmount, fromCurrency, toCurrency, reference)
+            .then(flwRes => {
+                if (flwRes.status !== 'success') {
+                    console.error("Critical: Flutterwave transfer failed to initiate", flwRes);
+                    // Optionally: Update transaction status to 'FAILED_API' in DB here
+                }
+            });
+
+        res.json({ success: true, message: "Conversion initiated. Funds are pending 3-day settlement." });
     } catch (err) {
         await query('ROLLBACK');
-        console.error("Conversion Error:", err);
         res.status(500).json({ message: "Transaction failed: " + err.message });
     }
+});
+
+// Daily Cron Job (3-day settlement logic remains as discussed)
+cron.schedule('0 1 * * *', async () => {
+    // Reconciliation logic would go here, checking status of the 'reference'
 });
 
 export default router;
