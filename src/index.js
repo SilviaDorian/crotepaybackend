@@ -4,6 +4,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import { query } from './db/index.js';
+import { startSettlementJob } from './jobs/reconciliation.js';
 
 // Import Routes
 import historyRoutes from './routes/history.js';
@@ -29,22 +30,16 @@ app.use(cors({
     origin: [
         'https://fielpay.free.nf', 
         'http://fielpay.free.nf',
-        'http://localhost:3000' // Added for your local testing
+        'http://localhost:3000'
     ],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'verif-hash'], // Added verif-hash for webhooks
+    allowedHeaders: ['Content-Type', 'Authorization', 'verif-hash'],
     credentials: true
 }));
 
 app.use(morgan('dev')); 
 
 // --- 2. Routes ---
-
-/**
- * NOTE: If you ever implement Stripe or high-security FLW checks, 
- * put the webhook route BEFORE express.json() if you need the raw body.
- * For now, standard express.json() should work with FLW's verif-hash.
- */
 app.use(express.json());
 
 app.use('/api/webhooks', webhookRoutes);
@@ -55,7 +50,6 @@ app.use('/api/withdraw', withdrawRoutes);
 app.use('/api/converter', converterRoutes);
 app.use('/api/history', historyRoutes);
 app.use('/api/revenue', revenueRoutes);
-
 
 // --- 3. Status Route ---
 app.get('/', (req, res) => {
@@ -68,11 +62,18 @@ app.get('/', (req, res) => {
     });
 });
 
-// --- 4. Cron Logic (Sync with ENUMs) ---
+// --- 4. Initialize Background Services ---
+try {
+    startSettlementJob();
+    console.log("✅ Settlement Reconciliation Job Initialized");
+} catch (err) {
+    console.error("❌ Failed to initialize Settlement Job:", err);
+}
+
+// --- 5. Cron Logic (Sync with ENUMs) ---
 app.get('/api/cron/cleanup', async (req, res) => {
     console.log("CRON: Auto-disputing expired vouchers...");
     try {
-        // Updated to use the ::voucher_status cast and the correct column name
         await query(`
             UPDATE vouchers 
             SET status = 'DISPUTED'::voucher_status, 
@@ -86,7 +87,7 @@ app.get('/api/cron/cleanup', async (req, res) => {
     }
 });
 
-// --- 5. Server Start ---
+// --- 6. Server Start ---
 if (process.env.NODE_ENV !== 'production') {
     const PORT = process.env.PORT || 4000;
     app.listen(PORT, '0.0.0.0', () => {
