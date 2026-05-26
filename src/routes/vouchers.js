@@ -6,16 +6,13 @@ const router = express.Router();
 const OWNER_EMAIL = 'deepxverified@gmail.com'; 
 
 /**
- * NEW: GET ALL VOUCHERS OR FILTER BY EMAIL
- * Handles: GET /api/vouchers?email=user@example.com
+ * GET ALL VOUCHERS OR FILTER BY EMAIL
  */
 router.get('/', async (req, res) => {
     const { email } = req.query;
-
     try {
         let result;
         if (email) {
-            // Fetch records where the user is either the creator OR the recipient
             result = await query(
                 `SELECT v.*, u.full_name AS creator_name 
                  FROM public.vouchers v
@@ -25,10 +22,8 @@ router.get('/', async (req, res) => {
                 [email]
             );
         } else {
-            // Fallback for admin overview if no email query parameter is supplied
             result = await query("SELECT * FROM public.vouchers ORDER BY created_at DESC");
         }
-
         res.json(result.rows);
     } catch (err) {
         console.error("Fetch Vouchers Error:", err.message);
@@ -40,19 +35,13 @@ router.get('/', async (req, res) => {
  * 1. CREATE VOUCHER
  */
 router.post('/create', async (req, res) => {
-    const { 
-        creator_email, recipient_email, recipient_name, 
-        amount, currency, description, category 
-    } = req.body;
-
+    const { creator_email, recipient_email, recipient_name, amount, currency, description, category } = req.body;
     if (!creator_email || !recipient_email || !recipient_name || !amount || !currency) {
         return res.status(400).json({ error: "Missing required fields." });
     }
-
     try {
         const userCheck = await query("SELECT kyc_tier FROM public.users WHERE email = $1", [creator_email]);
         const user = userCheck.rows[0];
-
         if (!user) return res.status(404).json({ error: "Creator account not found." });
         if (user.kyc_tier < 1) return res.status(403).json({ error: "KYC Tier 1 required." });
 
@@ -60,7 +49,6 @@ router.post('/create', async (req, res) => {
         const rawKey = crypto.randomBytes(8).toString('hex');
         const hashedKey = crypto.createHash('sha256').update(rawKey).digest('hex');
         const voucherId = `VC-${crypto.randomInt(100000, 999999)}`;
-        
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + 14); 
 
@@ -71,20 +59,9 @@ router.post('/create', async (req, res) => {
                 release_key_hash, expires_at, description, category
             ) 
             VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING'::text::voucher_status, $8, $9, $10, $11)`,
-            [
-                voucherId, creator_email, recipient_email, recipient_name, 
-                amount, currency, usdValue, hashedKey, 
-                expiresAt, description || "FielPay Escrow", category || "General"
-            ]
+            [voucherId, creator_email, recipient_email, recipient_name, amount, currency, usdValue, hashedKey, expiresAt, description || "FielPay Escrow", category || "General"]
         );
-
-        res.status(201).json({ 
-            success: true,
-            voucher_code: voucherId, 
-            ref_id: voucherId,
-            releaseKey: rawKey, 
-            message: `Voucher created successfully.`
-        });
+        res.status(201).json({ success: true, voucher_code: voucherId, ref_id: voucherId, releaseKey: rawKey, message: "Voucher created successfully." });
     } catch (err) {
         console.error("Voucher Creation Error:", err.message);
         res.status(500).json({ error: "Server error during voucher creation." });
@@ -93,7 +70,6 @@ router.post('/create', async (req, res) => {
 
 /**
  * 2. GET VOUCHER DETAILS BY UNIQUE ID
- * Note: Placed below root route to avoid wildcard string capture interference
  */
 router.get('/:id', async (req, res) => {
     try {
@@ -104,7 +80,6 @@ router.get('/:id', async (req, res) => {
              WHERE v.id = $1`, 
             [req.params.id]
         );
-
         if (result.rows.length === 0) return res.status(404).json({ error: "Voucher not found" });
         res.json(result.rows[0]);
     } catch (err) {
@@ -118,7 +93,6 @@ router.get('/:id', async (req, res) => {
 router.post('/release', async (req, res) => {
     const { voucher_id, releaseKey } = req.body;
     let client;
-
     try {
         client = await getClient();
         await client.query('BEGIN');
@@ -128,7 +102,7 @@ router.post('/release', async (req, res) => {
         const v = vResult.rows[0];
 
         if (!v) throw new Error("Voucher not found.");
-        if (v.status !== 'LOCKED') throw new Error(`Funds are currently ${v.status}. Payment must be verified.`);
+        if (v.status !== 'LOCKED') throw new Error(`Funds are currently ${v.status}.`);
 
         if (releaseKey) {
             const hashedInput = crypto.createHash('sha256').update(releaseKey).digest('hex');
@@ -139,23 +113,32 @@ router.post('/release', async (req, res) => {
         const fee = parseFloat((amount * 0.07).toFixed(4)); 
         const netAmount = amount - fee;
 
-        // 1. Deduct from CREATOR's Escrow
+        // Calculate time in escrow based on 'locked_at'
+        const escrowStartTime = new Date(v.locked_at || v.created_at);
+        const now = new Date();
+        const diffInHours = (now - escrowStartTime) / (1000 * 60 * 60);
+
+        // Logic: If >= 72 hours, move to AVAILABLE immediately, else AWAITING_SETTLEMENT
+        const targetColumn = diffInHours >= 72 ? 'available_balance' : 'awaiting_settlement';
+        const newStatus = diffInHours >= 72 ? 'RELEASED' : 'AWAITING_SETTLEMENT';
+
+        // Deduct from ESCROW
         await client.query(
             "UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
             [amount, v.creator_email, v.currency]
         );
 
-        // 2. Add Net to CREATOR's Available Balance
+        // Deposit into target wallet
         await client.query(`
-            INSERT INTO wallets (user_email, available_balance, currency) 
+            INSERT INTO wallets (user_email, ${targetColumn}, currency) 
             VALUES ($1, $2, $3)
             ON CONFLICT (user_email, currency) DO UPDATE SET 
-            available_balance = wallets.available_balance + $2, 
+            ${targetColumn} = wallets.${targetColumn} + $2, 
             updated_at = NOW()`,
             [v.creator_email, netAmount, v.currency]
         );
 
-        // 3. System Fee to Platform Owner
+        // Add fee to owner
         await client.query(`
             INSERT INTO wallets (user_email, available_balance, currency) 
             VALUES ($1, $2, $3)
@@ -165,13 +148,13 @@ router.post('/release', async (req, res) => {
             [OWNER_EMAIL, fee, v.currency]
         );
 
-        // 4. Update Voucher Status
+        // Update Voucher Status
         await client.query(
-            "UPDATE vouchers SET status = 'RELEASED'::text::voucher_status, updated_at = NOW() WHERE id = $1", 
-            [v.id]
+            "UPDATE vouchers SET status = $1::text::voucher_status, updated_at = NOW() WHERE id = $2", 
+            [newStatus, v.id]
         );
 
-        // 5. Log Audit Transaction
+        // Log Audit
         await client.query(`
             INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, fee, status, reference_id) 
             VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, $5, 'SUCCESSFUL'::text::voucher_status, $6)`,
@@ -179,11 +162,9 @@ router.post('/release', async (req, res) => {
         );
 
         await client.query('COMMIT');
-        res.json({ success: true, message: "Funds are released to balance." });
-
+        res.json({ success: true, message: `Funds moved to ${targetColumn}.` });
     } catch (e) {
         if (client) await client.query('ROLLBACK');
-        console.error("Release Error:", e.message);
         res.status(400).json({ error: e.message });
     } finally {
         if (client) client.release();
