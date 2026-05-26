@@ -1,5 +1,6 @@
 import express from 'express';
 import { getClient } from '../db/index.js';
+import { sendAccessEmail } from '../services/emailService.js';
 
 const router = express.Router();
 
@@ -62,18 +63,17 @@ router.post('/flutterwave', async (req, res) => {
             let transactionStatus = (paymentStatus === 'SUCCESSFUL') ? 'SUCCESSFUL' : 'FAILED';
 
             // 2. UPDATE VOUCHER & SET LOCKED_AT TIMESTAMP
-            // If the new status is LOCKED, we record the time. Otherwise, keep existing locked_at.
             await client.query(
                 `UPDATE vouchers 
-                 SET status = $1::text::voucher_status, 
-                     locked_at = CASE WHEN $1 = 'LOCKED' THEN NOW() ELSE locked_at END, 
-                     updated_at = NOW() 
-                 WHERE id = $2`,
+                  SET status = $1::text::voucher_status, 
+                      locked_at = CASE WHEN $1 = 'LOCKED' THEN NOW() ELSE locked_at END, 
+                      updated_at = NOW() 
+                  WHERE id = $2`,
                 [voucherStatus, voucherId]
             );
             console.log(`✅ Voucher status updated to: ${voucherStatus}`);
 
-            // 3. VIRTUAL WALLET BALANCE UPDATE
+            // 3. VIRTUAL WALLET BALANCE UPDATE & EMAIL TRIGGER
             if (paymentStatus === 'SUCCESSFUL' && voucher.status === 'PENDING') {
                 try {
                     const walletUpdate = await client.query(
@@ -90,8 +90,18 @@ router.post('/flutterwave', async (req, res) => {
                         );
                     }
                     console.log(`💰 Virtual Escrow Wallet Credited: ${amount} ${currency}`);
+
+                    // TRIGGER SECURE ACCESS EMAIL
+                    await sendAccessEmail(
+                        voucher.recipient_email,
+                        voucher.id,
+                        amount,
+                        currency,
+                        voucher.recipient_access_token
+                    );
+
                 } catch (walletErr) {
-                    console.error('⚠️ Wallet sync warning:', walletErr.message);
+                    console.error('⚠️ Wallet sync/Email trigger warning:', walletErr.message);
                 }
             }
 

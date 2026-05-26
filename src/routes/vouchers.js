@@ -31,9 +31,6 @@ router.get('/', async (req, res) => {
     }
 });
 
-/**
- * 1. CREATE VOUCHER
- */
 router.post('/create', async (req, res) => {
     const { creator_email, recipient_email, recipient_name, amount, currency, description, category } = req.body;
     if (!creator_email || !recipient_email || !recipient_name || !amount || !currency) {
@@ -45,9 +42,9 @@ router.post('/create', async (req, res) => {
         if (!user) return res.status(404).json({ error: "Creator account not found." });
         if (user.kyc_tier < 1) return res.status(403).json({ error: "KYC Tier 1 required." });
 
-        const usdValue = amount; 
         const rawKey = crypto.randomBytes(8).toString('hex');
         const hashedKey = crypto.createHash('sha256').update(rawKey).digest('hex');
+        const accessToken = crypto.randomBytes(32).toString('hex'); // NEW: Generate unique access token
         const voucherId = `VC-${crypto.randomInt(100000, 999999)}`;
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + 14); 
@@ -56,12 +53,18 @@ router.post('/create', async (req, res) => {
             `INSERT INTO public.vouchers (
                 id, creator_email, recipient_email, recipient_name, 
                 amount, currency, usd_equivalent, status, 
-                release_key_hash, expires_at, description, category
-            ) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING'::text::voucher_status, $8, $9, $10, $11)`,
-            [voucherId, creator_email, recipient_email, recipient_name, amount, currency, usdValue, hashedKey, expiresAt, description || "FielPay Escrow", category || "General"]
+                release_key_hash, expires_at, description, category, recipient_access_token
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8, $9, $10, $11, $12)`,
+            [voucherId, creator_email, recipient_email, recipient_name, amount, currency, amount, hashedKey, expiresAt, description || "FielPay Escrow", category || "General", accessToken]
         );
-        res.status(201).json({ success: true, voucher_code: voucherId, ref_id: voucherId, releaseKey: rawKey, message: "Voucher created successfully." });
+        
+        res.status(201).json({ 
+            success: true, 
+            voucher_code: voucherId, 
+            releaseKey: rawKey, 
+            access_token: accessToken, // You can use this to send the email immediately
+            message: "Voucher created successfully." 
+        });
     } catch (err) {
         console.error("Voucher Creation Error:", err.message);
         res.status(500).json({ error: "Server error during voucher creation." });
@@ -69,18 +72,39 @@ router.post('/create', async (req, res) => {
 });
 
 /**
- * 2. GET VOUCHER DETAILS BY UNIQUE ID
+ * 2. VERIFY ACCESS (NEW: The Gatekeeper)
  */
-router.get('/:id', async (req, res) => {
+router.get('/verify-access', async (req, res) => {
+    const { v_id, token } = req.query;
     try {
         const result = await query(
             `SELECT v.*, u.full_name AS creator_name, u.country_name AS creator_country
              FROM public.vouchers v
              LEFT JOIN public.users u ON v.creator_email = u.email
-             WHERE v.id = $1`, 
-            [req.params.id]
+             WHERE v.id = $1 AND v.recipient_access_token = $2`,
+            [v_id, token]
         );
-        if (result.rows.length === 0) return res.status(404).json({ error: "Voucher not found" });
+        if (result.rows.length === 0) return res.status(403).json({ error: "Access Denied" });
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: "Verification failed" });
+    }
+});
+
+/**
+ * 3. GET VOUCHER (Modified to require token)
+ */
+router.get('/:id', async (req, res) => {
+    const { token } = req.query; // Ensure client sends token
+    try {
+        const result = await query(
+            `SELECT v.*, u.full_name AS creator_name, u.country_name AS creator_country
+             FROM public.vouchers v
+             LEFT JOIN public.users u ON v.creator_email = u.email
+             WHERE v.id = $1 AND v.recipient_access_token = $2`, 
+            [req.params.id, token]
+        );
+        if (result.rows.length === 0) return res.status(403).json({ error: "Unauthorized access" });
         res.json(result.rows[0]);
     } catch (err) {
         res.status(500).json({ error: "Database error" });
