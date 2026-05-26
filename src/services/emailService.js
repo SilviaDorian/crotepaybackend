@@ -1,5 +1,3 @@
-import fetch from 'node-fetch'; // Ensure you have node-fetch installed
-
 const EMAILJS_SERVICE_ID = 'service_wx42dxx';
 const EMAILJS_TEMPLATE_ID = 'template_8pbuyxc';
 const EMAILJS_PRIVATE_KEY = '-J8bRmT-323GS6gWkD-B_'; // This is actually the Private Key needed for server-side
