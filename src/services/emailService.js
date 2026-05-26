@@ -1,6 +1,6 @@
 const EMAILJS_SERVICE_ID = 'service_wx42dxx';
 const EMAILJS_TEMPLATE_ID = 'template_8pbuyxc';
-const EMAILJS_PUBLIC_KEY = 'MrFecWdsSnbLhfL9K'; // Get this from EmailJS Account > API Keys
+const EMAILJS_PUBLIC_KEY = 'MrFecWdsSnbLhfL9K';
 const EMAILJS_PRIVATE_KEY = '-J8bRmT-323GS6gWkD-B_';
 
 export async function sendAccessEmail(recipientEmail, voucherId, amount, currency, token) {
@@ -9,12 +9,14 @@ export async function sendAccessEmail(recipientEmail, voucherId, amount, currenc
     try {
         const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+                'Content-Type': 'application/json' 
+            },
             body: JSON.stringify({
                 service_id: EMAILJS_SERVICE_ID,
                 template_id: EMAILJS_TEMPLATE_ID,
-                public_key: EMAILJS_PUBLIC_KEY,
-                private_key: EMAILJS_PRIVATE_KEY,
+                user_id: EMAILJS_PUBLIC_KEY,
+                accessToken: EMAILJS_PRIVATE_KEY, // EmailJS uses 'accessToken' for backend private key auth
                 template_params: {
                     to_email: recipientEmail,
                     voucher_id: voucherId,
