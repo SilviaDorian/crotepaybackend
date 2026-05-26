@@ -44,7 +44,7 @@ router.post('/create', async (req, res) => {
 
         const rawKey = crypto.randomBytes(8).toString('hex');
         const hashedKey = crypto.createHash('sha256').update(rawKey).digest('hex');
-        const accessToken = crypto.randomBytes(32).toString('hex'); // NEW: Generate unique access token
+        const accessToken = crypto.randomBytes(32).toString('hex');
         const voucherId = `VC-${crypto.randomInt(100000, 999999)}`;
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + 14); 
@@ -62,7 +62,7 @@ router.post('/create', async (req, res) => {
             success: true, 
             voucher_code: voucherId, 
             releaseKey: rawKey, 
-            access_token: accessToken, // You can use this to send the email immediately
+            access_token: accessToken, 
             message: "Voucher created successfully." 
         });
     } catch (err) {
@@ -72,7 +72,29 @@ router.post('/create', async (req, res) => {
 });
 
 /**
- * 2. VERIFY ACCESS (NEW: The Gatekeeper)
+ * 1. PUBLIC ACCESS (For payment-link.html)
+ * No token required.
+ */
+router.get('/public/:id', async (req, res) => {
+    try {
+        const result = await query(
+            `SELECT v.*, u.full_name AS creator_name, u.country_name AS creator_country
+             FROM public.vouchers v
+             LEFT JOIN public.users u ON v.creator_email = u.email
+             WHERE v.id = $1`, 
+            [req.params.id]
+        );
+
+        if (result.rows.length === 0) return res.status(404).json({ error: "Voucher not found" });
+        res.json(result.rows[0]);
+    } catch (err) {
+        console.error("Public Fetch Error:", err.message);
+        res.status(500).json({ error: "Database error" });
+    }
+});
+
+/**
+ * 2. VERIFY ACCESS (The Gatekeeper)
  */
 router.get('/verify-access', async (req, res) => {
     const { v_id, token } = req.query;
@@ -92,10 +114,10 @@ router.get('/verify-access', async (req, res) => {
 });
 
 /**
- * 3. GET VOUCHER (Modified to require token)
+ * 3. GET VOUCHER (Restricted: requires token for success.html)
  */
 router.get('/:id', async (req, res) => {
-    const { token } = req.query; // Ensure client sends token
+    const { token } = req.query;
     try {
         const result = await query(
             `SELECT v.*, u.full_name AS creator_name, u.country_name AS creator_country
@@ -112,7 +134,7 @@ router.get('/:id', async (req, res) => {
 });
 
 /**
- * 3. RELEASE FUNDS (LEDGER MOVEMENT)
+ * 4. RELEASE FUNDS
  */
 router.post('/release', async (req, res) => {
     const { voucher_id, releaseKey } = req.body;
@@ -137,22 +159,18 @@ router.post('/release', async (req, res) => {
         const fee = parseFloat((amount * 0.07).toFixed(4)); 
         const netAmount = amount - fee;
 
-        // Calculate time in escrow based on 'locked_at'
         const escrowStartTime = new Date(v.locked_at || v.created_at);
         const now = new Date();
         const diffInHours = (now - escrowStartTime) / (1000 * 60 * 60);
 
-        // Logic: If >= 72 hours, move to AVAILABLE immediately, else AWAITING_SETTLEMENT
         const targetColumn = diffInHours >= 72 ? 'available_balance' : 'awaiting_settlement';
         const newStatus = diffInHours >= 72 ? 'RELEASED' : 'AWAITING_SETTLEMENT';
 
-        // Deduct from ESCROW
         await client.query(
             "UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
             [amount, v.creator_email, v.currency]
         );
 
-        // Deposit into target wallet
         await client.query(`
             INSERT INTO wallets (user_email, ${targetColumn}, currency) 
             VALUES ($1, $2, $3)
@@ -162,7 +180,6 @@ router.post('/release', async (req, res) => {
             [v.creator_email, netAmount, v.currency]
         );
 
-        // Add fee to owner
         await client.query(`
             INSERT INTO wallets (user_email, available_balance, currency) 
             VALUES ($1, $2, $3)
@@ -172,13 +189,11 @@ router.post('/release', async (req, res) => {
             [OWNER_EMAIL, fee, v.currency]
         );
 
-        // Update Voucher Status
         await client.query(
             "UPDATE vouchers SET status = $1::text::voucher_status, updated_at = NOW() WHERE id = $2", 
             [newStatus, v.id]
         );
 
-        // Log Audit
         await client.query(`
             INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, fee, status, reference_id) 
             VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, $5, 'SUCCESSFUL'::text::voucher_status, $6)`,
@@ -196,7 +211,7 @@ router.post('/release', async (req, res) => {
 });
 
 /**
- * 4. DISPUTE
+ * 5. DISPUTE
  */
 router.post('/dispute', async (req, res) => {
     const { voucher_id, reason } = req.body;
