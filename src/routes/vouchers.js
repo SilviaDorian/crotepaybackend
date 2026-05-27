@@ -118,7 +118,7 @@ router.get('/verify-access', async (req, res) => {
         );
         if (result.rows.length === 0) return res.status(403).json({ error: "Access Denied" });
         delete result.rows[0].recipient_access_token;
-        delete result.rows[0].release_key_hash;
+        //delete result.rows[0].release_key_hash;
         res.json(result.rows[0]);
     } catch (err) {
         console.error("Verify Access Error:", err.message);
