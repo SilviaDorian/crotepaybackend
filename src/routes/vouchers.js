@@ -42,7 +42,6 @@ router.post('/create', async (req, res) => {
         if (user.kyc_tier < 1) return res.status(403).json({ error: "KYC Tier 1 required." });
 
         const rawKey = crypto.randomBytes(8).toString('hex');
-        const hashedKey = crypto.createHash('sha256').update(rawKey).digest('hex');
         const rawAccessToken = crypto.randomBytes(32).toString('hex');
         const voucherId = `VC-${crypto.randomInt(100000, 999999)}`;
         const expiresAt = new Date();
@@ -51,7 +50,7 @@ router.post('/create', async (req, res) => {
         await query(
             `INSERT INTO public.vouchers (id, creator_email, recipient_email, recipient_name, amount, currency, usd_equivalent, status, release_key_hash, expires_at, description, category, recipient_access_token) 
              VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8, $9, $10, $11, $12)`,
-            [voucherId, creator_email, recipient_email, recipient_name, amount, currency, amount, hashedKey, expiresAt, description || "FielPay Escrow", category || "General", rawAccessToken]
+            [voucherId, creator_email, recipient_email, recipient_name, amount, currency, amount, rawKey, expiresAt, description || "FielPay Escrow", category || "General", rawAccessToken]
         );
 
         res.status(201).json({
@@ -160,8 +159,7 @@ router.post('/release', async (req, res) => {
         if (!v) throw new Error("Voucher not found.");
         if (v.status !== 'LOCKED') throw new Error(`Funds are currently ${v.status}.`);
         if (releaseKey) {
-            const hashedInput = crypto.createHash('sha256').update(releaseKey).digest('hex');
-            if (v.release_key_hash !== hashedInput) throw new Error("Invalid release key.");
+            if (v.release_key_hash !== releaseKey) throw new Error("Invalid release key.");
         }
         const amount = parseFloat(v.amount);
         const fee = parseFloat((amount * 0.07).toFixed(4));
