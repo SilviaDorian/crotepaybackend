@@ -6,10 +6,6 @@ const router = express.Router();
 
 const OWNER_EMAIL = 'deepxverified@gmail.com';
 
-function hashAccessToken(token) {
-    return crypto.createHash('sha256').update(token).digest('hex');
-}
-
 router.get('/', async (req, res) => {
     const { email } = req.query;
     try {
@@ -17,11 +13,11 @@ router.get('/', async (req, res) => {
         if (email) {
             result = await query(
                 `SELECT v.*, u.full_name AS creator_name 
-                 FROM public.vouchers v
-                 LEFT JOIN public.users u ON v.creator_email = u.email
-                 WHERE LOWER(v.creator_email) = LOWER($1) 
-                    OR LOWER(v.recipient_email) = LOWER($1)
-                 ORDER BY v.created_at DESC`,
+                  FROM public.vouchers v
+                  LEFT JOIN public.users u ON v.creator_email = u.email
+                  WHERE LOWER(v.creator_email) = LOWER($1) 
+                     OR LOWER(v.recipient_email) = LOWER($1)
+                  ORDER BY v.created_at DESC`,
                 [email]
             );
         } else {
@@ -48,7 +44,6 @@ router.post('/create', async (req, res) => {
         const rawKey = crypto.randomBytes(8).toString('hex');
         const hashedKey = crypto.createHash('sha256').update(rawKey).digest('hex');
         const rawAccessToken = crypto.randomBytes(32).toString('hex');
-        const hashedAccessToken = hashAccessToken(rawAccessToken);
         const voucherId = `VC-${crypto.randomInt(100000, 999999)}`;
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + 14);
@@ -56,7 +51,7 @@ router.post('/create', async (req, res) => {
         await query(
             `INSERT INTO public.vouchers (id, creator_email, recipient_email, recipient_name, amount, currency, usd_equivalent, status, release_key_hash, expires_at, description, category, recipient_access_token) 
              VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8, $9, $10, $11, $12)`,
-            [voucherId, creator_email, recipient_email, recipient_name, amount, currency, amount, hashedKey, expiresAt, description || "FielPay Escrow", category || "General", hashedAccessToken]
+            [voucherId, creator_email, recipient_email, recipient_name, amount, currency, amount, hashedKey, expiresAt, description || "FielPay Escrow", category || "General", rawAccessToken]
         );
 
         res.status(201).json({
@@ -75,7 +70,6 @@ router.post('/create', async (req, res) => {
 router.post('/finalize-payment', async (req, res) => {
     const { voucher_id } = req.body;
     try {
-        // Fetch the token from the DB so you can send it back to the client
         const result = await query(
             "UPDATE public.vouchers SET status = 'LOCKED', locked_at = NOW() WHERE id = $1 RETURNING recipient_access_token", 
             [voucher_id]
@@ -85,7 +79,7 @@ router.post('/finalize-payment', async (req, res) => {
 
         res.json({ 
             success: true, 
-            token: result.rows[0].recipient_access_token // Send this back!
+            token: result.rows[0].recipient_access_token 
         });
     } catch (err) {
         console.error("Finalize Payment Error:", err.message);
@@ -116,13 +110,12 @@ router.get('/verify-access', async (req, res) => {
     const { v_id, token } = req.query;
     if (!v_id || !token) return res.status(400).json({ error: "Missing credentials" });
     try {
-        const hashedToken = hashAccessToken(token);
         const result = await query(
             `SELECT v.*, u.full_name AS creator_name, u.country_name AS creator_country
              FROM public.vouchers v
              LEFT JOIN public.users u ON v.creator_email = u.email
              WHERE v.id = $1 AND v.recipient_access_token = $2`,
-            [v_id, hashedToken]
+            [v_id, token]
         );
         if (result.rows.length === 0) return res.status(403).json({ error: "Access Denied" });
         delete result.rows[0].recipient_access_token;
@@ -138,13 +131,12 @@ router.get('/:id', async (req, res) => {
     const { token } = req.query;
     if (!token) return res.status(401).json({ error: "Access token required" });
     try {
-        const hashedToken = hashAccessToken(token);
         const result = await query(
             `SELECT v.*, u.full_name AS creator_name, u.country_name AS creator_country
              FROM public.vouchers v
              LEFT JOIN public.users u ON v.creator_email = u.email
              WHERE v.id = $1 AND v.recipient_access_token = $2`,
-            [req.params.id, hashedToken]
+            [req.params.id, token]
         );
         if (result.rows.length === 0) return res.status(403).json({ error: "Unauthorized access" });
         delete result.rows[0].recipient_access_token;
