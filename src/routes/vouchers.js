@@ -152,26 +152,62 @@ router.post('/release', async (req, res) => {
         client = await getClient();
         await client.query('BEGIN');
         await client.query('SET search_path TO public');
+
+        // 1. Fetch and Lock the voucher
         const vResult = await client.query("SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", [voucher_id]);
         const v = vResult.rows[0];
         if (!v) throw new Error("Voucher not found.");
         if (v.status !== 'LOCKED') throw new Error(`Funds are currently ${v.status}.`);
-        if (releaseKey) {
-            if (v.release_key_hash !== releaseKey) throw new Error("Invalid release key.");
-        }
+        if (v.release_key_hash !== releaseKey) throw new Error("Invalid release key.");
+
         const amount = parseFloat(v.amount);
         const fee = parseFloat((amount * 0.07).toFixed(4));
         const netAmount = amount - fee;
+
+        // 2. Logic: Determine if funds are immediately available or in settlement
         const escrowStartTime = new Date(v.locked_at || v.created_at);
         const now = new Date();
         const diffInHours = (now - escrowStartTime) / (1000 * 60 * 60);
+        
+        // Define destination and ensure status is always 'RELEASED' to avoid ENUM errors
         const targetColumn = diffInHours >= 72 ? 'available_balance' : 'awaiting_settlement';
-        const newStatus = diffInHours >= 72 ? 'RELEASED' : 'AWAITING_SETTLEMENT';
-        await client.query(`UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3`, [amount, v.creator_email, v.currency]);
-        await client.query(`INSERT INTO wallets (user_email, ${targetColumn}, currency) VALUES ($1, $2, $3) ON CONFLICT (user_email, currency) DO UPDATE SET ${targetColumn} = wallets.${targetColumn} + $2, updated_at = NOW()`, [v.creator_email, netAmount, v.currency]);
-        await client.query(`INSERT INTO wallets (user_email, available_balance, currency) VALUES ($1, $2, $3) ON CONFLICT (user_email, currency) DO UPDATE SET available_balance = wallets.available_balance + $2, updated_at = NOW()`, [OWNER_EMAIL, fee, v.currency]);
-        await client.query(`UPDATE vouchers SET status = $1::text::voucher_status, updated_at = NOW() WHERE id = $2`, [newStatus, v.id]);
-        await client.query(`INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, fee, status, reference_id) VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, $5, 'SUCCESSFUL'::text::voucher_status, $6)`, [v.creator_email, v.id, netAmount, v.currency, fee, `REL-${v.id}`]);
+
+        // 3. Deduct from Escrow
+        await client.query(
+            `UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() 
+             WHERE user_email = $2 AND currency = $3`,
+            [amount, v.creator_email, v.currency]
+        );
+
+        // 4. Update Creator Wallet (Add to Target Bucket)
+        // Note: Using DO UPDATE logic to ensure we don't violate Foreign Key constraints
+        await client.query(
+            `INSERT INTO wallets (user_email, ${targetColumn}, currency) 
+             VALUES ($1, $2, $3) 
+             ON CONFLICT (user_email, currency) 
+             DO UPDATE SET ${targetColumn} = wallets.${targetColumn} + $2, updated_at = NOW()`,
+            [v.creator_email, netAmount, v.currency]
+        );
+
+        // 5. Pay the Platform Fee
+        await client.query(
+            `INSERT INTO wallets (user_email, available_balance, currency) 
+             VALUES ($1, $2, $3) 
+             ON CONFLICT (user_email, currency) 
+             DO UPDATE SET available_balance = wallets.available_balance + $2, updated_at = NOW()`,
+            [OWNER_EMAIL, fee, v.currency]
+        );
+
+        // 6. Finalize Voucher (Always set to 'RELEASED' to match your ENUM)
+        await client.query(`UPDATE vouchers SET status = 'RELEASED', updated_at = NOW() WHERE id = $1`, [v.id]);
+
+        // 7. Log Transaction
+        await client.query(
+            `INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, fee, status, reference_id) 
+             VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, $5, 'SUCCESSFUL', $6)`, 
+            [v.creator_email, v.id, netAmount, v.currency, fee, `REL-${v.id}`]
+        );
+
         await client.query('COMMIT');
         res.json({ success: true, message: `Funds moved to ${targetColumn}.` });
     } catch (e) {
