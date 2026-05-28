@@ -11,6 +11,7 @@ import revenueRoutes from './routes/revenue.js';
 import webhookRoutes from './routes/webhooks.js';
 import userRoutes from './routes/users.js';
 import voucherRoutes from './routes/vouchers.js';
+import walletRoutes from './routes/wallets.js';
 import adminRoutes from './routes/admin.js';
 import cronRoutes from './routes/cron.js'; // The new trigger route
 import converterRoutes from './routes/converter.js';
@@ -49,6 +50,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/withdraw', withdrawRoutes);
 app.use('/api/converter', converterRoutes);
 app.use('/api/history', historyRoutes);
+app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes); // Mounts the reconciliation trigger
 
