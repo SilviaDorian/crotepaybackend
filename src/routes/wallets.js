@@ -14,10 +14,11 @@ router.get('/dashboard/:email', async (req, res) => {
         const { email } = req.params;
 
         // 1. Existing Wallet Stats
+        // UPDATED CODE:
         const walletRes = await query(
-            "SELECT available_balance, escrow_balance, currency FROM public.wallets WHERE user_email = $1", 
-            [email]
-        );
+    "SELECT available_balance, escrow_balance, awaiting_settlement, currency FROM public.wallets WHERE user_email = $1", 
+    [email]
+);
         
         // 2. Updated Voucher Aggregates: Include details about locked vouchers
         const statsRes = await query(
