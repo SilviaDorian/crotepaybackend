@@ -205,13 +205,33 @@ router.post('/release', async (req, res) => {
 });
 
 router.post('/dispute', async (req, res) => {
-    const { voucher_id, reason } = req.body;
+    const { voucher_id, reason, story } = req.body;
+    
+    // Validation
+    if (!voucher_id || !reason || !story) {
+        return res.status(400).json({ error: "Missing required dispute information." });
+    }
+
     try {
-        await query(`UPDATE public.vouchers SET status = 'DISPUTED'::text::voucher_status, description = $1, updated_at = NOW() WHERE id = $2`, [reason || "User initiated dispute", voucher_id]);
-        res.json({ success: true, message: "Funds frozen." });
+        // Update the voucher status and store the dispute context
+        // We use 'DISPUTED' as the status and save the user's input for your review
+        await query(
+            `UPDATE public.vouchers 
+             SET status = 'DISPUTED', 
+                 dispute_reason = $1, 
+                 dispute_story = $2, 
+                 updated_at = NOW() 
+             WHERE id = $3`, 
+            [reason, story, voucher_id]
+        );
+
+        res.json({ 
+            success: true, 
+            message: "Dispute submitted successfully. Funds have been frozen pending administrative review." 
+        });
     } catch (err) {
         console.error("Dispute Error:", err.message);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Internal server error while processing dispute." });
     }
 });
 
