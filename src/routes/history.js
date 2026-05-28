@@ -6,17 +6,18 @@ const router = express.Router();
 /**
  * 1. GET /api/history/wallets
  */
+// In history.js, update the /wallets route:
 router.get('/wallets', async (req, res) => {
     const { email } = req.query;
     if (!email) return res.status(400).json({ error: "Email is required" });
 
     try {
-        // Kept 'currency' because it exists in your schema!
         const result = await query(
             `SELECT 
                 currency, 
                 available_balance, 
-                escrow_balance
+                escrow_balance,
+                awaiting_settlement  -- ADD THIS LINE
              FROM public.wallets 
              WHERE user_email = $1 
              ORDER BY 
