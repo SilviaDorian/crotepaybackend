@@ -6,19 +6,15 @@ const router = express.Router();
 /**
  * 1. GET BALANCE & STATS
  */
-/**
- * 1. GET BALANCE & STATS (Updated)
- */
 router.get('/dashboard/:email', async (req, res) => {
     try {
         const { email } = req.params;
 
         // 1. Existing Wallet Stats
-        // UPDATED CODE:
         const walletRes = await query(
-    "SELECT available_balance, escrow_balance, awaiting_settlement, currency FROM public.wallets WHERE user_email = $1", 
-    [email]
-);
+            "SELECT available_balance, escrow_balance, awaiting_settlement, currency FROM public.wallets WHERE user_email = $1", 
+            [email]
+        );
         
         // 2. Updated Voucher Aggregates: Include details about locked vouchers
         const statsRes = await query(
@@ -44,7 +40,7 @@ router.get('/dashboard/:email', async (req, res) => {
         const stats = statsRes.rows[0];
 
         res.json({
-            wallets: walletRes.rows.length > 0 ? walletRes.rows : [{ available_balance: "0.00", escrow_balance: "0.00", currency: "USD" }],
+            wallets: walletRes.rows.length > 0 ? walletRes.rows : [{ available_balance: "0.00", escrow_balance: "0.00", awaiting_settlement: "0.00", currency: "USD" }],
             summary: {
                 active_vouchers: parseInt(stats.active_escrows || 0),
                 completed_vouchers: parseInt(stats.total_completed || 0),
