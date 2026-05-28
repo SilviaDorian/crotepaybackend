@@ -121,7 +121,7 @@ router.get('/verify-access', async (req, res) => {
     }
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/secure/:id', async (req, res) => {
     const { token } = req.query;
     if (!token) return res.status(401).json({ error: "Access token required" });
     try {
