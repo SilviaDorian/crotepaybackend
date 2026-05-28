@@ -20,7 +20,6 @@ router.post('/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const userEmail = email.toLowerCase().trim();
 
-        // FIX: removed non-existent "id"
         const check = await client.query(
             "SELECT 1 FROM users WHERE email = $1",
             [userEmail]
@@ -30,7 +29,6 @@ router.post('/register', async (req, res) => {
             return res.status(400).json({ error: "Email already registered." });
         }
 
-        // Tier 1 defaults
         await client.query(
             `INSERT INTO users (
                 email, password_hash, full_name, 
@@ -86,7 +84,6 @@ router.post('/login', async (req, res) => {
             success: true,
             token,
             user: {
-                // FIX: removed user.id (does not exist in DB)
                 full_name: user.full_name,
                 email: user.email,
                 currency: user.preferred_currency,
@@ -114,21 +111,16 @@ router.post('/request-phone-otp', async (req, res) => {
 
     try {
         const userEmail = email.toLowerCase().trim();
-
         await query("DELETE FROM public.verification_codes WHERE email = $1", [userEmail]);
-
         await query(
             "INSERT INTO public.verification_codes (email, code, expires_at) VALUES ($1, $2, NOW() + INTERVAL '10 minutes')",
             [userEmail, otp]
         );
-
         await query(
             "UPDATE public.users SET phone_number = $1 WHERE email = $2",
             [phone_number, userEmail]
         );
-
         res.json({ success: true, code: otp });
-
     } catch (err) {
         console.error("OTP Error:", err.message);
         res.status(500).json({ error: "Database error." });
@@ -136,7 +128,7 @@ router.post('/request-phone-otp', async (req, res) => {
 });
 
 /**
- * 4. TIER 2: VERIFY OTP (Upgrade to Tier 2)
+ * 4. TIER 2: VERIFY OTP
  */
 router.post('/verify-phone-otp', async (req, res) => {
     const { email, code } = req.body;
@@ -148,37 +140,21 @@ router.post('/verify-phone-otp', async (req, res) => {
         await client.query('SET search_path TO public');
 
         const userEmail = email.toLowerCase().trim();
-
         const result = await client.query(
             "SELECT * FROM verification_codes WHERE email = $1 AND code = $2 AND expires_at > NOW()",
             [userEmail, code]
         );
 
-        if (result.rows.length === 0) {
-            throw new Error("Invalid or expired code.");
-        }
+        if (result.rows.length === 0) throw new Error("Invalid or expired code.");
 
-        await client.query(
-            "UPDATE users SET kyc_tier = 2, phone_verified = true, updated_at = NOW() WHERE email = $1",
-            [userEmail]
-        );
-
-        await client.query(
-            "UPDATE wallets SET daily_withdraw_limit = 500.00, max_balance_limit = 2000.00, updated_at = NOW() WHERE user_email = $1",
-            [userEmail]
-        );
-
-        await client.query(
-            "DELETE FROM verification_codes WHERE email = $1",
-            [userEmail]
-        );
+        await client.query("UPDATE users SET kyc_tier = 2, phone_verified = true, updated_at = NOW() WHERE email = $1", [userEmail]);
+        await client.query("UPDATE wallets SET daily_withdraw_limit = 500.00, max_balance_limit = 2000.00, updated_at = NOW() WHERE user_email = $1", [userEmail]);
+        await client.query("DELETE FROM verification_codes WHERE email = $1", [userEmail]);
 
         await client.query('COMMIT');
         res.json({ success: true, message: "Verification successful. Limits upgraded!" });
-
     } catch (err) {
         if (client) await client.query('ROLLBACK');
-        console.error("Verification Error:", err.message);
         res.status(400).json({ error: err.message });
     } finally {
         if (client) client.release();
@@ -186,25 +162,24 @@ router.post('/verify-phone-otp', async (req, res) => {
 });
 
 /**
- * 5. TIER 3: SUBMIT DOCUMENTS
+ * 5. TIER 3: SUBMIT DOCUMENTS (User side)
  */
 router.post('/submit-docs', async (req, res) => {
-    const { email, tax_id, document_url, video_url } = req.body;
+    const { email, document_url, address_url, video_url } = req.body;
 
     try {
         await query(
             `UPDATE public.users SET 
-                tax_id = $1, 
-                document_url = $2, 
+                document_url = $1, 
+                address_url = $2, 
                 video_url = $3,
                 kyc_status = 'PENDING', 
                 updated_at = NOW() 
              WHERE email = $4`,
-            [tax_id, document_url, video_url || null, email.toLowerCase().trim()]
+            [document_url, address_url, video_url, email.toLowerCase().trim()]
         );
 
         res.json({ success: true, message: "Documents submitted for review." });
-
     } catch (err) {
         console.error("KYC Submission Error:", err.message);
         res.status(500).json({ error: "Failed to update KYC documents." });
@@ -212,23 +187,41 @@ router.post('/submit-docs', async (req, res) => {
 });
 
 /**
- * 6. REFRESH USER DATA
+ * 6. ADMIN: TRIGGER UPGRADE (Manual Review Approval)
+ */
+router.post('/admin/upgrade-tier-3', async (req, res) => {
+    const { email } = req.body;
+    try {
+        await query(
+            "UPDATE public.users SET kyc_tier = 3, kyc_status = 'VERIFIED', updated_at = NOW() WHERE email = $1", 
+            [email.toLowerCase().trim()]
+        );
+
+        // Unlimited limits set to a high-precision number
+        await query(
+            "UPDATE public.wallets SET daily_withdraw_limit = 999999999.00, max_balance_limit = 999999999.00, updated_at = NOW() WHERE user_email = $1",
+            [email.toLowerCase().trim()]
+        );
+
+        res.json({ success: true, message: "User successfully upgraded to Merchant Pro (Tier 3)." });
+    } catch (err) {
+        console.error("Admin Upgrade Error:", err.message);
+        res.status(500).json({ error: "Upgrade failed." });
+    }
+});
+
+/**
+ * 7. REFRESH USER DATA
  */
 router.get('/me/:email', async (req, res) => {
     try {
         const result = await query(
             `SELECT email, full_name, preferred_currency, kyc_tier, kyc_status, phone_verified, phone_number 
-             FROM public.users 
-             WHERE email = $1`,
+             FROM public.users WHERE email = $1`,
             [req.params.email.toLowerCase()]
         );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: "User not found" });
-        }
-
+        if (result.rows.length === 0) return res.status(404).json({ error: "User not found" });
         res.json(result.rows[0]);
-
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
