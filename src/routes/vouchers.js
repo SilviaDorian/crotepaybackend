@@ -56,8 +56,6 @@ router.post('/create', async (req, res) => {
         res.status(201).json({
             success: true,
             voucher_code: voucherId,
-            //releaseKey: rawKey,
-            //access_token: rawAccessToken,
             message: "Voucher created successfully."
         });
     } catch (err) {
