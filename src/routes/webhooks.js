@@ -1,5 +1,6 @@
 import express from 'express';
 import { getClient } from '../db/index.js';
+import { sendAccessEmail } from '../services/emailService.js';
 
 const router = express.Router();
 
@@ -42,23 +43,18 @@ router.post('/flutterwave', async (req, res) => {
          */
         if (payload.event === 'charge.completed') {
 
-            const voucherId = payload.data.tx_ref?.trim();
-
-            const paymentStatus =
-                payload.data.status?.toUpperCase() || 'FAILED';
-
+            const txRef = payload.data.tx_ref?.trim();
+            const paymentStatus = payload.data.status?.toUpperCase() || 'FAILED';
             const amount = Number(payload.data.amount || 0);
-
             const flutterwaveTxId = String(payload.data.id);
+            const isBatch = txRef?.startsWith('BATCH-');
 
-            console.log(
-                `💳 WEBHOOK RECEIVED: ${voucherId} | STATUS: ${paymentStatus}`
-            );
+            console.log(`💳 WEBHOOK RECEIVED: ${txRef} | STATUS: ${paymentStatus} | TYPE: ${isBatch ? 'BATCH' : 'SINGLE'}`);
 
             /**
              * Missing Reference
              */
-            if (!voucherId) {
+            if (!txRef) {
 
                 console.error('❌ Missing tx_ref');
 
@@ -68,19 +64,37 @@ router.post('/flutterwave', async (req, res) => {
 
             }
 
+            // BATCH PROCESSING LOGIC
+            if (isBatch) {
+                if (paymentStatus === 'SUCCESSFUL') {
+                    await client.query(
+                        "UPDATE vouchers SET status = 'LOCKED', locked_at = NOW(), updated_at = NOW() WHERE parent_batch_ref = $1 AND status = 'PENDING'",
+                        [txRef]
+                    );
+                    
+                    const batchResult = await client.query("SELECT * FROM vouchers WHERE parent_batch_ref = $1", [txRef]);
+                    for (const v of batchResult.rows) {
+                        await sendAccessEmail(v.recipient_email, v.id, v.amount, v.currency, v.recipient_access_token);
+                    }
+                    console.log(`✅ Batch ${txRef} processed.`);
+                }
+                await client.query('COMMIT');
+                return res.status(200).send('Batch processed');
+            }
+
             /**
-             * Fetch Voucher
+             * Fetch Voucher (Single)
              */
             const voucherResult = await client.query(
                 `SELECT * FROM vouchers
                  WHERE id = $1
                  FOR UPDATE`,
-                [voucherId]
+                [txRef]
             );
 
             if (voucherResult.rows.length === 0) {
 
-                console.error(`❌ Voucher not found in DB: ${voucherId}`);
+                console.error(`❌ Voucher not found in DB: ${txRef}`);
 
                 await client.query('COMMIT');
 
@@ -152,7 +166,7 @@ router.post('/flutterwave', async (req, res) => {
 
                 WHERE id = $2
                 `,
-                [voucherStatus, voucherId]
+                [voucherStatus, txRef]
             );
 
             console.log(
@@ -160,7 +174,7 @@ router.post('/flutterwave', async (req, res) => {
             );
 
             /**
-             * Successful Payment
+             * Successful Payment (Single)
              */
             if (
                 paymentStatus === 'SUCCESSFUL' &&
@@ -229,6 +243,15 @@ router.post('/flutterwave', async (req, res) => {
                         `💰 Virtual Escrow Wallet Credited: ${amount} ${currency}`
                     );
 
+                    // TRIGGER ACCESS EMAIL
+                    await sendAccessEmail(
+                        voucher.recipient_email,
+                        voucher.id,
+                        amount,
+                        currency,
+                        voucher.recipient_access_token
+                    );
+
                 } catch (walletErr) {
 
                     console.error(
@@ -282,7 +305,7 @@ router.post('/flutterwave', async (req, res) => {
                     `,
                     [
                         voucher.creator_email,
-                        voucherId,
+                        txRef,
                         amount,
                         currency,
                         transactionStatus,

@@ -4,6 +4,8 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import { query } from './db/index.js';
+import { createBulkEscrow } from './controllers/BulkController.js'; // Add this line
+
 
 // Import Routes
 import historyRoutes from './routes/history.js';
@@ -53,6 +55,10 @@ app.use('/api/history', historyRoutes);
 app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes); // Mounts the reconciliation trigger
+app.use('/api/bulk', express.json(), (req, res) => {
+    // This allows you to call createBulkEscrow directly
+    createBulkEscrow(req, res);
+});
 
 // --- 3. Status Route ---
 app.get('/', (req, res) => {
