@@ -4,7 +4,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import { query } from './db/index.js';
-import { createBulkEscrow } from './controllers/bulkController.js'; // Add this line
+import { createBulkEscrow } from './src/controllers/bulkControllers.js';
 
 
 // Import Routes
