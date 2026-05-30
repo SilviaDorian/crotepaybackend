@@ -1,27 +1,27 @@
-import { query, pool } from '../db/index.js'; // Ensure you import pool to manage transactions
-import crypto from 'crypto';
+import { pool } from '../db/index.js';
+import { generateVoucherId, generateToken, generateKey, generateBatchRef } from '../utils/idGenerator.js';
 
 export async function createBulkEscrow(req, res) {
     const { creator_email, employees, description, category } = req.body;
 
+    // 1. Basic Payload Validation
     if (!creator_email || !employees || !Array.isArray(employees) || employees.length === 0) {
         return res.status(400).json({ error: "Invalid request. Please provide a valid creator email and a list of employees." });
     }
 
-    // Use a client from the pool for transactional integrity
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN'); // Start Transaction
 
-        // 1. Verify Creator existence
+        // 2. Verify Creator existence
         const creatorCheck = await client.query("SELECT kyc_tier FROM public.users WHERE email = $1", [creator_email]);
         if (creatorCheck.rows.length === 0) {
             await client.query('ROLLBACK');
             return res.status(404).json({ error: `Account for '${creator_email}' not found.` });
         }
 
-        // 2. Validate Currencies & Calculate Total Amount
+        // 3. Validate Currencies & Calculate Total Amount
         let totalAmount = 0;
         const uniqueCurrencies = [...new Set(employees.map(e => e.currency))];
         
@@ -34,24 +34,25 @@ export async function createBulkEscrow(req, res) {
         for (const curr of uniqueCurrencies) {
             if (!existingCurrencies.includes(curr)) {
                 await client.query('ROLLBACK');
-                return res.status(400).json({ error: `Wallet for '${curr}' is not initialized.` });
+                return res.status(400).json({ error: `Wallet for currency '${curr}' is not initialized.` });
             }
         }
 
-        // 3. Batch Insertion Logic
-        const batchReference = `BATCH-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
+        // 4. Batch Insertion Logic
+        const batchReference = generateBatchRef();
         
         for (const emp of employees) {
+            // Validate individual record data
             if (!emp.email || !emp.name || !emp.amount || Number(emp.amount) <= 0) {
                 await client.query('ROLLBACK');
                 return res.status(400).json({ error: `Invalid data for ${emp.email || 'employee'}.` });
             }
 
-            totalAmount += Number(emp.amount); // Accumulate total for Flutterwave verification
+            totalAmount += Number(emp.amount); // Accumulate total for Flutterwave
 
-            const voucherId = `VC-${crypto.randomInt(100000, 999999)}`;
-            const token = crypto.randomBytes(32).toString('hex');
-            const releaseKey = crypto.randomBytes(8).toString('hex');
+            const voucherId = generateVoucherId();
+            const token = generateToken();
+            const releaseKey = generateKey();
 
             await client.query(`
                 INSERT INTO public.vouchers (
@@ -59,9 +60,11 @@ export async function createBulkEscrow(req, res) {
                     currency, status, parent_batch_ref, description, category, 
                     recipient_access_token, release_key_hash
                 ) VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7, $8, $9, $10, $11)
-            `, [voucherId, creator_email, emp.email, emp.name, emp.amount, 
+            `, [
+                voucherId, creator_email, emp.email, emp.name, emp.amount, 
                 emp.currency, batchReference, description || 'Bulk Escrow', 
-                category || 'General', token, releaseKey]);
+                category || 'General', token, releaseKey
+            ]);
         }
 
         await client.query('COMMIT'); // Commit all changes if successful
@@ -69,7 +72,7 @@ export async function createBulkEscrow(req, res) {
         res.status(201).json({ 
             success: true, 
             batchReference, 
-            totalAmount: totalAmount.toFixed(2), // Send this back for Flutterwave
+            totalAmount: totalAmount.toFixed(2), 
             count: employees.length 
         });
 
