@@ -1,6 +1,7 @@
 import { getClient } from '../db/index.js';
 import { generateVoucherId, generateToken, generateKey, generateBatchRef } from '../utils/idGenerator.js';
 
+// --- BATCH CREATION ---
 export async function createBulkEscrow(req, res) {
     const { creator_email, employees, description, category } = req.body;
     if (!creator_email || !Array.isArray(employees) || employees.length === 0) 
@@ -28,12 +29,12 @@ export async function createBulkEscrow(req, res) {
     } finally { client.release(); }
 }
 
+// --- SECURE BATCH RETRIEVAL (Fixed for 400 error) ---
 export async function getBulkBatch(req, res) {
-    // FIX: Destructure safely
-    const { batchRef } = req.params;
-    const { token } = req.query; 
+    // Attempt to extract from params, fallback to splitting URL if params are empty
+    const batchRef = req.params.batchRef || req.url.split('/')[4]?.split('?')[0];
+    const token = req.query.token;
 
-    // FIX: Add explicit check to prevent 400 errors if params are missing
     if (!batchRef || !token) {
         return res.status(400).json({ error: "Missing batch reference or token." });
     }
@@ -45,15 +46,26 @@ export async function getBulkBatch(req, res) {
             [batchRef, token]
         );
         
-        if (rows.length === 0) return res.status(403).json({ error: "Access Denied: Invalid batch or token." });
-        
+        if (rows.length === 0) return res.status(403).json({ error: "Access Denied." });
         res.json({ success: true, vouchers: rows });
     } catch (err) {
-        res.status(500).json({ error: "Database error during retrieval." });
+        res.status(500).json({ error: "Database error." });
     } finally { client.release(); }
 }
 
-// --- REMAINING FUNCTIONS UNCHANGED ---
+// --- PAYMENT FINALIZATION ---
+export async function finalizeBatch(req, res) {
+    const { batchRef, batchAccessToken } = req.body;
+    const client = await getClient();
+    try {
+        await client.query("UPDATE public.vouchers SET status = 'LOCKED', locked_at = NOW() WHERE parent_batch_ref = $1 AND batch_access_token = $2", [batchRef, batchAccessToken]);
+        res.json({ success: true, message: "Batch locked successfully." });
+    } catch (err) {
+        res.status(500).json({ error: "Finalization failed." });
+    } finally { client.release(); }
+}
+
+// --- SINGLE VOUCHER OPS ---
 export async function releaseSingleVoucher(req, res) {
     const { voucher_id, releaseKey } = req.body;
     let client;
