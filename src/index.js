@@ -45,6 +45,7 @@ app.use('/api/withdraw', withdrawRoutes);
 app.use('/api/converter', converterRoutes);
 app.use('/api/history', historyRoutes);
 app.use('/api/wallets', walletRoutes);
+app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes);
 
 // --- 3. Fixed Bulk Routes ---
