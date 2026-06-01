@@ -53,6 +53,34 @@ export async function getBulkBatch(req, res) {
     } finally { client.release(); }
 }
 
+export async function getBatchDetails(req, res) {
+    const { batchRef } = req.params;
+    const { token } = req.query; // This is the batch_access_token
+
+    if (!batchRef || !token) return res.status(400).json({ error: "Missing credentials." });
+
+    const client = await getClient();
+    try {
+        const { rows } = await client.query(
+            "SELECT * FROM public.vouchers WHERE parent_batch_ref = $1 AND batch_access_token = $2",
+            [batchRef, token]
+        );
+        
+        if (rows.length === 0) return res.status(403).json({ error: "Access Denied." });
+
+        // Return organized data for the frontend success page
+        res.json({ 
+            success: true, 
+            batchRef: rows[0].parent_batch_ref,
+            masterKey: rows[0].master_release_key, // The raw key stored in DB
+            status: rows[0].status,
+            vouchers: rows 
+        });
+    } catch (err) {
+        res.status(500).json({ error: "Database error." });
+    } finally { client.release(); }
+}
+
 // --- PAYMENT FINALIZATION ---
 export async function finalizeBatch(req, res) {
     const { batchRef, batchAccessToken } = req.body;
