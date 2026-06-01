@@ -54,7 +54,7 @@ app.post('/api/bulk/create', createBulkEscrow);
 app.get('/api/bulk/batch/:batchRef', getBulkBatch);
 app.post('/api/bulk/finalize', finalizeBatch);
 // Add this to your routes in index.js
-app.get('/api/bulk/details/:batchRef', getBulkBatchDetails); // Ensure getBatchDetails is imported
+//app.get('/api/bulk/details/:batchRef', getBulkBatchDetails); // Ensure getBatchDetails is imported
 
 // --- 4. Status Route ---
 app.get('/', (req, res) => {
