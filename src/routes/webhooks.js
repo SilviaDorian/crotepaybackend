@@ -1,6 +1,6 @@
 import express from 'express';
 import { getClient } from '../db/index.js';
-import { sendAccessEmail } from '../services/emailService.js';
+import { sendNotification } from '../services/notificationService.js';
 
 const router = express.Router();
 
@@ -33,9 +33,7 @@ router.post('/flutterwave', async (req, res) => {
     try {
 
         client = await getClient();
-
         await client.query('BEGIN');
-
         await client.query('SET search_path TO public');
 
         /**
@@ -74,7 +72,12 @@ router.post('/flutterwave', async (req, res) => {
                     
                     const batchResult = await client.query("SELECT * FROM vouchers WHERE parent_batch_ref = $1", [txRef]);
                     for (const v of batchResult.rows) {
-                        await sendAccessEmail(v.recipient_email, v.id, v.amount, v.currency, v.recipient_access_token);
+                        await sendNotification('VOUCHER_CREATED', v.recipient_email, {
+                            voucher_id: v.id,
+                            amount: v.amount,
+                            currency: v.currency,
+                            access_token: v.recipient_access_token
+                        });
                     }
                     console.log(`✅ Batch ${txRef} processed.`);
                 }
@@ -244,13 +247,12 @@ router.post('/flutterwave', async (req, res) => {
                     );
 
                     // TRIGGER ACCESS EMAIL
-                    await sendAccessEmail(
-                        voucher.recipient_email,
-                        voucher.id,
-                        amount,
-                        currency,
-                        voucher.recipient_access_token
-                    );
+                    await sendNotification('VOUCHER_CREATED', voucher.recipient_email, {
+                        voucher_id: voucher.id,
+                        amount: amount,
+                        currency: currency,
+                        access_token: voucher.recipient_access_token
+                    });
 
                 } catch (walletErr) {
 
