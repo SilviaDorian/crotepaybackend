@@ -1,153 +1,119 @@
 import { getClient } from '../db/index.js';
-import {
-    generateVoucherId,
-    generateToken,
-    generateKey,
-    generateBatchRef
-} from '../utils/idGenerator.js';
+import { generateVoucherId, generateToken, generateKey, generateBatchRef } from '../utils/idGenerator.js';
 
 export async function createBulkEscrow(req, res) {
     const { creator_email, employees, description, category } = req.body;
-
-    // 1. Validate input
-    if (
-        !creator_email ||
-        !employees ||
-        !Array.isArray(employees) ||
-        employees.length === 0
-    ) {
-        return res.status(400).json({
-            error: "Invalid request. Please provide a valid creator email and a list of employees."
-        });
-    }
+    if (!creator_email || !Array.isArray(employees) || employees.length === 0) 
+        return res.status(400).json({ error: "Invalid request data." });
 
     const client = await getClient();
-
     try {
         await client.query('BEGIN');
-
-        // 2. Verify creator
-        const creatorCheck = await client.query(
-            "SELECT kyc_tier FROM public.users WHERE email = $1",
-            [creator_email]
-        );
-
-        if (creatorCheck.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({
-                error: `Account for '${creator_email}' not found.`
-            });
-        }
-
-        // 3. Validate currencies
-        const uniqueCurrencies = [...new Set(employees.map(e => e.currency))];
-
-        const walletCheck = await client.query(
-            "SELECT currency FROM wallets WHERE user_email = $1 AND currency = ANY($2)",
-            [creator_email, uniqueCurrencies]
-        );
-
-        const existingCurrencies = walletCheck.rows.map(r => r.currency);
-
-        for (const curr of uniqueCurrencies) {
-            if (!existingCurrencies.includes(curr)) {
-                await client.query('ROLLBACK');
-                return res.status(400).json({
-                    error: `Wallet for currency '${curr}' is not initialized.`
-                });
-            }
-        }
-
-        // 4. NEW: Batch-level data
         const batchReference = generateBatchRef();
         const batchAccessToken = generateToken();
         const masterReleaseKey = generateKey();
-
-        let totalAmount = 0;
-
-        // 5. Create vouchers
+        
         for (const emp of employees) {
-            if (
-                !emp.email ||
-                !emp.name ||
-                !emp.amount ||
-                Number(emp.amount) <= 0
-            ) {
-                await client.query('ROLLBACK');
-                return res.status(400).json({
-                    error: `Invalid data for ${emp.email || 'employee'}.`
-                });
-            }
-
-            totalAmount += Number(emp.amount);
-
-            const voucherId = generateVoucherId();
-            const token = generateToken();
-            const releaseKey = generateKey();
-
             await client.query(
-                `
-                INSERT INTO public.vouchers (
-                    id,
-                    creator_email,
-                    recipient_email,
-                    recipient_name,
-                    amount,
-                    currency,
-                    status,
-                    parent_batch_ref,
-                    description,
-                    category,
-                    recipient_access_token,
-                    release_key_hash,
-                    batch_access_token,
-                    master_release_key
-                )
-                VALUES ($1,$2,$3,$4,$5,$6,'PENDING',$7,$8,$9,$10,$11,$12,$13)
-                `,
-                [
-                    voucherId,
-                    creator_email,
-                    emp.email,
-                    emp.name,
-                    emp.amount,
-                    emp.currency,
-                    batchReference,
-                    description || 'Bulk Escrow',
-                    category || 'General',
-                    token,
-                    releaseKey,
-                    batchAccessToken,
-                    masterReleaseKey
-                ]
+                `INSERT INTO public.vouchers (id, creator_email, recipient_email, recipient_name, amount, currency, status, parent_batch_ref, batch_access_token, master_release_key, recipient_access_token, release_key_hash) 
+                 VALUES ($1,$2,$3,$4,$5,$6,'PENDING',$7,$8,$9,$10,$11)`,
+                [generateVoucherId(), creator_email, emp.email.trim(), emp.name.trim(), parseFloat(emp.amount), emp.currency.toUpperCase(), batchReference, batchAccessToken, masterReleaseKey, generateToken(), generateKey()]
             );
         }
-
         await client.query('COMMIT');
-
-        // 6. RESPONSE FOR FRONTEND FLOW
-        return res.status(201).json({
-            success: true,
-            batchReference,
-            totalAmount: totalAmount.toFixed(2),
-            count: employees.length,
-
-            // important for your 3-screen flow
-            batchAccessToken,
-            masterReleaseKey,
-
-            payment_url: `/batchpayment.html?batch=${batchReference}`
-        });
-
+        res.status(201).json({ success: true, batchReference, batchAccessToken, masterReleaseKey });
     } catch (err) {
         await client.query('ROLLBACK');
-        console.error("Bulk Creation Error:", err.message);
+        res.status(500).json({ error: "Batch creation failed." });
+    } finally { client.release(); }
+}
 
-        return res.status(500).json({
-            error: "An internal error occurred. No vouchers were created."
-        });
+export async function getBulkBatch(req, res) {
+    const { batchRef } = req.params;
+    const { token } = req.query; 
+    const client = await getClient();
+    try {
+        const { rows } = await client.query(
+            "SELECT * FROM public.vouchers WHERE parent_batch_ref = $1 AND batch_access_token = $2",
+            [batchRef, token]
+        );
+        if (rows.length === 0) return res.status(403).json({ error: "Access Denied" });
+        res.json({ success: true, vouchers: rows });
+    } finally { client.release(); }
+}
 
-    } finally {
-        client.release();
-    }
+export async function releaseSingleVoucher(req, res) {
+    const { voucher_id, releaseKey } = req.body;
+    let client;
+    try {
+        client = await getClient();
+        await client.query('BEGIN');
+        const vResult = await client.query("SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", [voucher_id]);
+        const v = vResult.rows[0];
+        if (!v || v.release_key_hash !== releaseKey) throw new Error("Invalid voucher or key.");
+        if (v.status !== 'LOCKED') throw new Error("Voucher not in locked status.");
+
+        const amount = parseFloat(v.amount);
+        const escrowStartTime = new Date(v.locked_at || v.created_at);
+        const targetColumn = (new Date() - escrowStartTime) / (1000 * 60 * 60) >= 72 ? 'available_balance' : 'awaiting_settlement';
+
+        await client.query("UPDATE wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3", [amount, v.creator_email, v.currency]);
+        await client.query(`INSERT INTO wallets (user_email, ${targetColumn}, currency) VALUES ($1, $2, $3) ON CONFLICT (user_email, currency) DO UPDATE SET ${targetColumn} = wallets.${targetColumn} + $2`, [v.creator_email, amount, v.currency]);
+        await client.query("UPDATE vouchers SET status = 'RELEASED', updated_at = NOW() WHERE id = $1", [voucher_id]);
+        await client.query("INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, 'SUCCESSFUL', $5)", [v.creator_email, v.id, amount, v.currency, `REL-${v.id}`]);
+        
+        await client.query('COMMIT');
+        res.json({ success: true, message: "Individual voucher released." });
+    } catch (e) {
+        if (client) await client.query('ROLLBACK');
+        res.status(400).json({ error: e.message });
+    } finally { if (client) client.release(); }
+}
+
+export async function disputeSingleVoucher(req, res) {
+    const { voucher_id, reason, story } = req.body;
+    try {
+        await (await getClient()).query(
+            "UPDATE public.vouchers SET status = 'DISPUTED', dispute_reason = $1, dispute_story = $2 WHERE id = $3",
+            [reason, story, voucher_id]
+        );
+        res.json({ success: true, message: "Individual voucher disputed." });
+    } catch (err) { res.status(500).json({ error: "Dispute failed." }); }
+}
+
+export async function releaseBatch(req, res) {
+    const { batchRef, masterReleaseKey } = req.body;
+    let client;
+    try {
+        client = await getClient();
+        await client.query('BEGIN');
+        const vResult = await client.query("SELECT * FROM vouchers WHERE parent_batch_ref = $1 FOR UPDATE", [batchRef]);
+        if (vResult.rows.length === 0 || vResult.rows[0].master_release_key !== masterReleaseKey) throw new Error("Invalid batch or key.");
+
+        for (const v of vResult.rows) {
+            if (v.status !== 'LOCKED') continue;
+            const amount = parseFloat(v.amount);
+            const targetColumn = (new Date() - new Date(v.locked_at || v.created_at)) / (1000 * 60 * 60) >= 72 ? 'available_balance' : 'awaiting_settlement';
+            await client.query("UPDATE wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3", [amount, v.creator_email, v.currency]);
+            await client.query(`INSERT INTO wallets (user_email, ${targetColumn}, currency) VALUES ($1, $2, $3) ON CONFLICT (user_email, currency) DO UPDATE SET ${targetColumn} = wallets.${targetColumn} + $2`, [v.creator_email, amount, v.currency]);
+            await client.query("UPDATE vouchers SET status = 'RELEASED', updated_at = NOW() WHERE id = $1", [v.id]);
+            await client.query("INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, 'SUCCESSFUL', $5)", [v.creator_email, v.id, amount, v.currency, `REL-${v.id}`]);
+        }
+        await client.query('COMMIT');
+        res.json({ success: true, message: "Batch released." });
+    } catch (e) {
+        if (client) await client.query('ROLLBACK');
+        res.status(400).json({ error: e.message });
+    } finally { if (client) client.release(); }
+}
+
+export async function disputeBatch(req, res) {
+    const { batchRef, reason, story } = req.body;
+    try {
+        await (await getClient()).query(
+            "UPDATE public.vouchers SET status = 'DISPUTED', dispute_reason = $1, dispute_story = $2 WHERE parent_batch_ref = $3",
+            [reason, story, batchRef]
+        );
+        res.json({ success: true, message: "Entire batch disputed." });
+    } catch (err) { res.status(500).json({ error: "Batch dispute failed." }); }
 }
