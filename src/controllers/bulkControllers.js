@@ -29,19 +29,31 @@ export async function createBulkEscrow(req, res) {
 }
 
 export async function getBulkBatch(req, res) {
+    // FIX: Destructure safely
     const { batchRef } = req.params;
     const { token } = req.query; 
+
+    // FIX: Add explicit check to prevent 400 errors if params are missing
+    if (!batchRef || !token) {
+        return res.status(400).json({ error: "Missing batch reference or token." });
+    }
+
     const client = await getClient();
     try {
         const { rows } = await client.query(
             "SELECT * FROM public.vouchers WHERE parent_batch_ref = $1 AND batch_access_token = $2",
             [batchRef, token]
         );
-        if (rows.length === 0) return res.status(403).json({ error: "Access Denied" });
+        
+        if (rows.length === 0) return res.status(403).json({ error: "Access Denied: Invalid batch or token." });
+        
         res.json({ success: true, vouchers: rows });
+    } catch (err) {
+        res.status(500).json({ error: "Database error during retrieval." });
     } finally { client.release(); }
 }
 
+// --- REMAINING FUNCTIONS UNCHANGED ---
 export async function releaseSingleVoucher(req, res) {
     const { voucher_id, releaseKey } = req.body;
     let client;
