@@ -1,4 +1,4 @@
-import { pool } from '../db/index.js';
+import { getClient } from '../db/index.js';
 import { generateVoucherId, generateToken, generateKey, generateBatchRef } from '../utils/idGenerator.js';
 
 export async function createBulkEscrow(req, res) {
@@ -9,7 +9,8 @@ export async function createBulkEscrow(req, res) {
         return res.status(400).json({ error: "Invalid request. Please provide a valid creator email and a list of employees." });
     }
 
-    const client = await pool.connect();
+
+    const client = await getClient();
 
     try {
         await client.query('BEGIN'); // Start Transaction
