@@ -6,7 +6,16 @@ import morgan from 'morgan';
 import { query } from './db/index.js';
 
 // Import Controllers
-import { createBulkEscrow, getBulkBatch, finalizeBatch } from './controllers/bulkControllers.js';
+import { 
+    createBulkEscrow, 
+    getBulkBatch, 
+    finalizeBatch, 
+    getBatchDetails, 
+    releaseSingleVoucher, 
+    releaseBatch, 
+    disputeBatch, 
+    disputeSingleVoucher 
+} from './controllers/bulkControllers.js';
 
 // Import Routes
 import historyRoutes from './routes/history.js';
@@ -48,13 +57,17 @@ app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes);
 
-// --- 3. Fixed Bulk Routes ---
-// These specific definitions prevent the 400 Bad Request error
+// --- 3. Bulk & Escrow Operations ---
 app.post('/api/bulk/create', createBulkEscrow);
 app.get('/api/bulk/batch/:batchRef', getBulkBatch);
 app.post('/api/bulk/finalize', finalizeBatch);
-// Add this to your routes in index.js
-//app.get('/api/bulk/details/:batchRef', getBulkBatchDetails); // Ensure getBatchDetails is imported
+
+// New Secure Routes for Batch & Voucher Management
+app.get('/api/bulk/details/:batchRef', getBatchDetails);
+app.post('/api/vouchers/release', releaseSingleVoucher);
+app.post('/api/vouchers/dispute', disputeSingleVoucher);
+app.post('/api/bulk/release', releaseBatch);
+app.post('/api/bulk/dispute', disputeBatch);
 
 // --- 4. Status Route ---
 app.get('/', (req, res) => {
@@ -68,7 +81,7 @@ app.get('/', (req, res) => {
 // --- 5. Inline Cron Logic ---
 app.get('/api/cron/cleanup', async (req, res) => {
     try {
-        await query(`UPDATE vouchers SET status = 'DISPUTED'::voucher_status WHERE status = 'LOCKED'::voucher_status AND expires_at <= NOW()`);
+        await query(`UPDATE vouchers SET status = 'DISPUTED' WHERE status = 'LOCKED' AND expires_at <= NOW()`);
         res.status(200).send("Cleanup successful");
     } catch (err) {
         res.status(500).send("Cron execution failed");
