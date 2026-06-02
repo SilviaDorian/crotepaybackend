@@ -93,29 +93,39 @@ export async function finalizeBatch(req, res) {
     } finally { client.release(); }
 }
 
-// --- SINGLE VOUCHER OPS ---
+// --- SINGLE VOUCHER RELEASE ---
 export async function releaseSingleVoucher(req, res) {
     const { voucher_id, releaseKey } = req.body;
     let client;
     try {
         client = await getClient();
         await client.query('BEGIN');
-        const vResult = await client.query("SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", [voucher_id]);
+        
+        const vResult = await client.query("SELECT * FROM public.vouchers WHERE id = $1 FOR UPDATE", [voucher_id]);
         const v = vResult.rows[0];
         if (!v || v.release_key_hash !== releaseKey) throw new Error("Invalid voucher or key.");
         if (v.status !== 'LOCKED') throw new Error("Voucher not in locked status.");
 
         const amount = parseFloat(v.amount);
-        const escrowStartTime = new Date(v.locked_at || v.created_at);
-        const targetColumn = (new Date() - escrowStartTime) / (1000 * 60 * 60) >= 72 ? 'available_balance' : 'awaiting_settlement';
+        const targetColumn = (new Date() - new Date(v.locked_at || v.created_at)) / (1000 * 60 * 60) >= 72 ? 'available_balance' : 'awaiting_settlement';
 
-        await client.query("UPDATE wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3", [amount, v.creator_email, v.currency]);
-        await client.query(`INSERT INTO wallets (user_email, ${targetColumn}, currency) VALUES ($1, $2, $3) ON CONFLICT (user_email, currency) DO UPDATE SET ${targetColumn} = wallets.${targetColumn} + $2`, [v.creator_email, amount, v.currency]);
-        await client.query("UPDATE vouchers SET status = 'RELEASED', updated_at = NOW() WHERE id = $1", [voucher_id]);
-        await client.query("INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, 'SUCCESSFUL', $5)", [v.creator_email, v.id, amount, v.currency, `REL-${v.id}`]);
+        // 1. Deduct from Recipient's Escrow
+        await client.query(
+            "UPDATE public.wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3",
+            [amount, v.recipient_email, v.currency]
+        );
+
+        // 2. Add to Recipient's Target Wallet
+        await client.query(
+            `UPDATE public.wallets SET ${targetColumn} = ${targetColumn} + $1 WHERE user_email = $2 AND currency = $3`,
+            [amount, v.recipient_email, v.currency]
+        );
+
+        await client.query("UPDATE public.vouchers SET status = 'RELEASED', updated_at = NOW() WHERE id = $1", [v.id]);
+        await client.query("INSERT INTO public.transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, 'SUCCESSFUL', $5)", [v.recipient_email, v.id, amount, v.currency, `REL-${v.id}`]);
         
         await client.query('COMMIT');
-        res.json({ success: true, message: "Individual voucher released." });
+        res.json({ success: true, message: "Voucher released successfully." });
     } catch (e) {
         if (client) await client.query('ROLLBACK');
         res.status(400).json({ error: e.message });
@@ -139,20 +149,44 @@ export async function releaseBatch(req, res) {
     try {
         client = await getClient();
         await client.query('BEGIN');
-        const vResult = await client.query("SELECT * FROM vouchers WHERE parent_batch_ref = $1 FOR UPDATE", [batchRef]);
-        if (vResult.rows.length === 0 || vResult.rows[0].master_release_key !== masterReleaseKey) throw new Error("Invalid batch or key.");
+        
+        const vResult = await client.query("SELECT * FROM public.vouchers WHERE parent_batch_ref = $1 FOR UPDATE", [batchRef]);
+        if (vResult.rows.length === 0 || vResult.rows[0].master_release_key !== masterReleaseKey) 
+            throw new Error("Invalid batch or key.");
 
         for (const v of vResult.rows) {
             if (v.status !== 'LOCKED') continue;
+
             const amount = parseFloat(v.amount);
-            const targetColumn = (new Date() - new Date(v.locked_at || v.created_at)) / (1000 * 60 * 60) >= 72 ? 'available_balance' : 'awaiting_settlement';
-            await client.query("UPDATE wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3", [amount, v.creator_email, v.currency]);
-            await client.query(`INSERT INTO wallets (user_email, ${targetColumn}, currency) VALUES ($1, $2, $3) ON CONFLICT (user_email, currency) DO UPDATE SET ${targetColumn} = wallets.${targetColumn} + $2`, [v.creator_email, amount, v.currency]);
-            await client.query("UPDATE vouchers SET status = 'RELEASED', updated_at = NOW() WHERE id = $1", [v.id]);
-            await client.query("INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, 'SUCCESSFUL', $5)", [v.creator_email, v.id, amount, v.currency, `REL-${v.id}`]);
+            const targetColumn = (new Date() - new Date(v.locked_at || v.created_at)) / (1000 * 60 * 60) >= 72 
+                                 ? 'available_balance' 
+                                 : 'awaiting_settlement';
+            
+            // 1. Deduct from Recipient's Escrow Balance
+            await client.query(
+                "UPDATE public.wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3",
+                [amount, v.recipient_email, v.currency]
+            );
+
+            // 2. Add to Recipient's target wallet (Awaiting or Available)
+            await client.query(
+                `UPDATE public.wallets 
+                 SET ${targetColumn} = ${targetColumn} + $1 
+                 WHERE user_email = $2 AND currency = $3`,
+                [amount, v.recipient_email, v.currency]
+            );
+
+            // 3. Finalize Voucher
+            await client.query("UPDATE public.vouchers SET status = 'RELEASED', updated_at = NOW() WHERE id = $1", [v.id]);
+            
+            // 4. Log Transaction
+            await client.query(
+                "INSERT INTO public.transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, 'SUCCESSFUL', $5)", 
+                [v.recipient_email, v.id, amount, v.currency, `REL-${v.id}`]
+            );
         }
         await client.query('COMMIT');
-        res.json({ success: true, message: "Batch released." });
+        res.json({ success: true, message: "Batch released successfully." });
     } catch (e) {
         if (client) await client.query('ROLLBACK');
         res.status(400).json({ error: e.message });

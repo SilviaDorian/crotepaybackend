@@ -159,42 +159,38 @@ router.post('/release', async (req, res) => {
 
         const amount = parseFloat(v.amount);
 
-        // 2. Logic: Determine if funds are immediately available or in settlement
+        // 2. Determine destination: available or settlement
         const escrowStartTime = new Date(v.locked_at || v.created_at);
-        const now = new Date();
-        const diffInHours = (now - escrowStartTime) / (1000 * 60 * 60);
-        
-        // Define destination bucket
+        const diffInHours = (new Date() - escrowStartTime) / (1000 * 60 * 60);
         const targetColumn = diffInHours >= 72 ? 'available_balance' : 'awaiting_settlement';
 
-        // 3. Deduct from Escrow
+        // 3. Move funds from Recipient's Escrow to their Wallet
+        // DEDUCT from Recipient's Escrow Balance
         await client.query(
-            `UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() 
+            "UPDATE wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3",
+            [amount, v.recipient_email, v.currency]
+        );
+
+        // ADD to Recipient's Target Wallet (Awaiting Settlement or Available)
+        await client.query(
+            `UPDATE wallets 
+             SET ${targetColumn} = ${targetColumn} + $1, updated_at = NOW() 
              WHERE user_email = $2 AND currency = $3`,
-            [amount, v.creator_email, v.currency]
+            [amount, v.recipient_email, v.currency]
         );
 
-        // 4. Update Creator Wallet (Add the FULL amount - No fees applied here)
-        await client.query(
-            `INSERT INTO wallets (user_email, ${targetColumn}, currency) 
-             VALUES ($1, $2, $3) 
-             ON CONFLICT (user_email, currency) 
-             DO UPDATE SET ${targetColumn} = wallets.${targetColumn} + $2, updated_at = NOW()`,
-            [v.creator_email, amount, v.currency]
-        );
-
-        // 5. Finalize Voucher
+        // 4. Finalize Voucher
         await client.query(`UPDATE vouchers SET status = 'RELEASED', updated_at = NOW() WHERE id = $1`, [v.id]);
 
-        // 6. Log Transaction
+        // 5. Log Transaction for the RECIPIENT
         await client.query(
             `INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) 
              VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, 'SUCCESSFUL', $5)`, 
-            [v.creator_email, v.id, amount, v.currency, `REL-${v.id}`]
+            [v.recipient_email, v.id, amount, v.currency, `REL-${v.id}`]
         );
 
         await client.query('COMMIT');
-        res.json({ success: true, message: `Funds moved to ${targetColumn}.` });
+        res.json({ success: true, message: `Funds moved from escrow to ${targetColumn}.` });
     } catch (e) {
         if (client) await client.query('ROLLBACK');
         console.error("Release Error:", e.message);
