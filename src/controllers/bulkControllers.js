@@ -160,12 +160,27 @@ export async function releaseBatch(req, res) {
 }
 
 export async function disputeBatch(req, res) {
-    const { batchRef, reason, story } = req.body;
+    const { batchRef, token, reason, story } = req.body;
     try {
-        await (await getClient()).query(
+        const client = await getClient();
+        
+        // Use the correct column name 'batch_access_token'
+        const authCheck = await client.query(
+            "SELECT id FROM public.bulk_batches WHERE reference = $1 AND batch_access_token = $2",
+            [batchRef, token]
+        );
+
+        if (authCheck.rowCount === 0) {
+            return res.status(403).json({ success: false, message: "Unauthorized: Invalid token." });
+        }
+
+        await client.query(
             "UPDATE public.vouchers SET status = 'DISPUTED', dispute_reason = $1, dispute_story = $2 WHERE parent_batch_ref = $3",
             [reason, story, batchRef]
         );
+        
         res.json({ success: true, message: "Entire batch disputed." });
-    } catch (err) { res.status(500).json({ error: "Batch dispute failed." }); }
+    } catch (err) { 
+        res.status(500).json({ error: "Batch dispute failed." }); 
+    }
 }
