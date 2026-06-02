@@ -162,7 +162,6 @@ export async function releaseBatch(req, res) {
 export async function disputeBatch(req, res) {
     const { batchRef, token, reason, story } = req.body;
 
-    // Validate input
     if (!batchRef || !token) {
         return res.status(400).json({ success: false, message: "Missing required fields." });
     }
@@ -170,23 +169,20 @@ export async function disputeBatch(req, res) {
     try {
         const client = await getClient();
         
-        // 1. Verify the batch and token
-        // Ensure 'batch_access_token' matches your public.bulk_batches schema
+        // Check if the batch exists in the vouchers table with that token
         const authCheck = await client.query(
-            "SELECT id FROM public.bulk_batches WHERE reference = $1 AND batch_access_token = $2",
+            "SELECT id FROM public.vouchers WHERE parent_batch_ref = $1 AND batch_access_token = $2 LIMIT 1",
             [batchRef, token]
         );
 
         if (authCheck.rowCount === 0) {
-            return res.status(403).json({ success: false, message: "Unauthorized: Invalid access token." });
+            return res.status(403).json({ success: false, message: "Unauthorized or invalid batch." });
         }
 
-        // 2. Perform the update
-        // We use an explicit CAST in the SQL query for the enum status 
-        // to prevent 'invalid input value for enum' errors.
+        // Use the schema-validated column names
         await client.query(
             `UPDATE public.vouchers 
-             SET status = 'DISPUTED'::public.voucher_status, 
+             SET status = 'DISPUTED', 
                  dispute_reason = $1, 
                  dispute_story = $2 
              WHERE parent_batch_ref = $3`,
@@ -195,10 +191,7 @@ export async function disputeBatch(req, res) {
         
         res.json({ success: true, message: "Entire batch disputed successfully." });
     } catch (err) { 
-        // Log the actual error to Vercel logs so we can see it!
         console.error("CRITICAL BACKEND ERROR in disputeBatch:", err);
-        
-        // Return the error message to the client for immediate debugging
         res.status(500).json({ 
             success: false, 
             error: "Batch dispute failed.", 
