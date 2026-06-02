@@ -12,7 +12,10 @@
   "crons": [
     {
       "path": "/api/cron/reconcile",
-      "schedule": "0 1 * * *"
+      "schedule": "0 */6 * * *",
+      "headers": {
+        "Authorization": "Bearer 3b6235cdd53de7be6e5cb1d227410d32eb20fd0a63b768d0ccd3639896eaef36"
+      }
     }
   ]
 }
