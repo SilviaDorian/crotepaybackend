@@ -43,7 +43,6 @@ router.post('/flutterwave', async (req, res) => {
             // Extract meta for batch processing
             const meta = payload.data.meta || {};
             const parentBatchRef = meta.parent_batch_ref;
-            const expectedVoucherCount = Number(meta.voucher_count || 0);
 
             console.log(`💳 WEBHOOK RECEIVED: ${txRef} | STATUS: ${paymentStatus} | TYPE: ${isBatch ? 'BATCH' : 'SINGLE'}`);
 
@@ -62,11 +61,6 @@ router.post('/flutterwave', async (req, res) => {
                     "SELECT * FROM vouchers WHERE parent_batch_ref = $1 AND status = 'PENDING'", 
                     [batchRef]
                 );
-
-                // Validation: Ensure database record count matches metadata
-                if (expectedVoucherCount > 0 && batchResult.rows.length !== expectedVoucherCount) {
-                    console.error(`⚠️ DISCREPANCY: Expected ${expectedVoucherCount} vouchers, but found ${batchResult.rows.length} in DB for batch ${batchRef}`);
-                }
 
                 for (const v of batchResult.rows) {
                     // 2. Credit individual wallet by VOUCHER AMOUNT
