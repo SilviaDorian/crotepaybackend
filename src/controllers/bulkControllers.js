@@ -10,7 +10,7 @@ export async function createBulkEscrow(req, res) {
     const client = await getClient();
     try {
         await client.query('BEGIN');
-        const batchReference = generateBatchRef();
+        const batchReference = generateBatchRef(); // This now acts as the clean Parent Batch ID
         const batchAccessToken = generateToken();
         const masterReleaseKey = generateKey();
         
@@ -18,7 +18,19 @@ export async function createBulkEscrow(req, res) {
             await client.query(
                 `INSERT INTO public.vouchers (id, creator_email, recipient_email, recipient_name, amount, currency, status, parent_batch_ref, batch_access_token, master_release_key, recipient_access_token, release_key_hash) 
                  VALUES ($1,$2,$3,$4,$5,$6,'PENDING',$7,$8,$9,$10,$11)`,
-                [generateVoucherId(), creator_email, emp.email.trim(), emp.name.trim(), parseFloat(emp.amount), emp.currency.toUpperCase(), batchReference, batchAccessToken, masterReleaseKey, generateToken(), generateKey()]
+                [
+                    generateVoucherId(), 
+                    creator_email, 
+                    emp.email.trim(), 
+                    emp.name.trim(), 
+                    parseFloat(emp.amount), 
+                    emp.currency.toUpperCase(), 
+                    batchReference, // Applied clean without suffix
+                    batchAccessToken, 
+                    masterReleaseKey, 
+                    generateToken(), 
+                    generateKey()
+                ]
             );
         }
         await client.query('COMMIT');
@@ -29,9 +41,8 @@ export async function createBulkEscrow(req, res) {
     } finally { client.release(); }
 }
 
-// --- SECURE BATCH RETRIEVAL (Fixed for 400 error) ---
+// --- SECURE BATCH RETRIEVAL ---
 export async function getBulkBatch(req, res) {
-    // Attempt to extract from params, fallback to splitting URL if params are empty
     const batchRef = req.params.batchRef || req.url.split('/')[4]?.split('?')[0];
     const token = req.query.token;
 
@@ -55,7 +66,7 @@ export async function getBulkBatch(req, res) {
 
 export async function getBatchDetails(req, res) {
     const { batchRef } = req.params;
-    const { token } = req.query; // This is the batch_access_token
+    const { token } = req.query;
 
     if (!batchRef || !token) return res.status(400).json({ error: "Missing credentials." });
 
@@ -68,11 +79,10 @@ export async function getBatchDetails(req, res) {
         
         if (rows.length === 0) return res.status(403).json({ error: "Access Denied." });
 
-        // Return organized data for the frontend success page
         res.json({ 
             success: true, 
             batchRef: rows[0].parent_batch_ref,
-            masterKey: rows[0].master_release_key, // The raw key stored in DB
+            masterKey: rows[0].master_release_key,
             status: rows[0].status,
             vouchers: rows 
         });
@@ -109,13 +119,11 @@ export async function releaseSingleVoucher(req, res) {
         const amount = parseFloat(v.amount);
         const targetColumn = (new Date() - new Date(v.locked_at || v.created_at)) / (1000 * 60 * 60) >= 72 ? 'available_balance' : 'awaiting_settlement';
 
-        // 1. Deduct from Recipient's Escrow
         await client.query(
             "UPDATE public.wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3",
             [amount, v.recipient_email, v.currency]
         );
 
-        // 2. Add to Recipient's Target Wallet
         await client.query(
             `UPDATE public.wallets SET ${targetColumn} = ${targetColumn} + $1 WHERE user_email = $2 AND currency = $3`,
             [amount, v.recipient_email, v.currency]
@@ -162,13 +170,11 @@ export async function releaseBatch(req, res) {
                                  ? 'available_balance' 
                                  : 'awaiting_settlement';
             
-            // 1. Deduct from Recipient's Escrow Balance
             await client.query(
                 "UPDATE public.wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3",
                 [amount, v.recipient_email, v.currency]
             );
 
-            // 2. Add to Recipient's target wallet (Awaiting or Available)
             await client.query(
                 `UPDATE public.wallets 
                  SET ${targetColumn} = ${targetColumn} + $1 
@@ -176,10 +182,8 @@ export async function releaseBatch(req, res) {
                 [amount, v.recipient_email, v.currency]
             );
 
-            // 3. Finalize Voucher
             await client.query("UPDATE public.vouchers SET status = 'RELEASED', updated_at = NOW() WHERE id = $1", [v.id]);
             
-            // 4. Log Transaction
             await client.query(
                 "INSERT INTO public.transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, 'SUCCESSFUL', $5)", 
                 [v.recipient_email, v.id, amount, v.currency, `REL-${v.id}`]
@@ -203,7 +207,6 @@ export async function disputeBatch(req, res) {
     try {
         const client = await getClient();
         
-        // Check if the batch exists in the vouchers table with that token
         const authCheck = await client.query(
             "SELECT id FROM public.vouchers WHERE parent_batch_ref = $1 AND batch_access_token = $2 LIMIT 1",
             [batchRef, token]
@@ -213,7 +216,6 @@ export async function disputeBatch(req, res) {
             return res.status(403).json({ success: false, message: "Unauthorized or invalid batch." });
         }
 
-        // Use the schema-validated column names
         await client.query(
             `UPDATE public.vouchers 
              SET status = 'DISPUTED', 
