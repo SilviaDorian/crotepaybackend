@@ -70,104 +70,67 @@ const batchRef = batchRefRaw
         // BULK PAYMENT FLOW
         // =========================================================
         if (batchRef) {
+    console.log(`🔄 BULK WEBHOOK for \( {batchRef} | txRef= \){txRef} | FLW_ID=${flutterwaveTxId}`);
 
-            const batchResult = await client.query(
-                `
-                SELECT *
-                FROM vouchers
-                WHERE parent_batch_ref = $1
-                FOR UPDATE
-                `,
-                [batchRef]
-            );
+    const batchResult = await client.query(
+        `SELECT * FROM vouchers WHERE parent_batch_ref = $1 FOR UPDATE`,
+        [batchRef]
+    );
 
-            if (batchResult.rows.length === 0) {
-                await client.query('COMMIT');
-                return res.status(200).send('Empty batch');
-            }
+    console.log(`📊 Found ${batchResult.rows.length} vouchers`);
 
-            for (const v of batchResult.rows) {
+    if (batchResult.rows.length === 0) {
+        console.warn(`❌ No matching vouchers for parent_batch_ref=${batchRef}`);
+        await client.query('COMMIT');
+        return res.status(200).send('Empty batch');
+    }
 
-                // idempotency guard
-                if (v.status !== 'PENDING') continue;
+    let processed = 0;
+    for (const v of batchResult.rows) {
+        console.log(`Voucher \( {v.id} status= \){v.status} email=\( {v.recipient_email} amount= \){v.amount}`);
 
-                const amount = Number(v.amount);
-
-                // 1. LOCK VOUCHER
-                await client.query(
-                    `
-                    UPDATE vouchers
-                    SET status = 'LOCKED',
-                        locked_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = $1
-                    `,
-                    [v.id]
-                );
-
-                // 2. FUND ESCROW (2-decimal safe)
-                await client.query(
-                    `
-                    INSERT INTO wallets (
-                        user_email,
-                        escrow_balance,
-                        available_balance,
-                        currency,
-                        updated_at
-                    )
-                    VALUES (
-                        $1,
-                        ROUND($2::numeric,2),
-                        0,
-                        $3,
-                        NOW()
-                    )
-                    ON CONFLICT (user_email, currency)
-                    DO UPDATE SET
-                        escrow_balance =
-                            wallets.escrow_balance +
-                            ROUND(EXCLUDED.escrow_balance,2),
-                        updated_at = NOW()
-                    `,
-                    [
-                        v.recipient_email,
-                        amount,
-                        v.currency
-                    ]
-                );
-
-                // 3. TRANSACTION LOG
-                await client.query(
-                    `
-                    INSERT INTO transactions (
-                        user_email,
-                        voucher_id,
-                        transaction_type,
-                        amount,
-                        currency,
-                        status,
-                        reference_id,
-                        created_at,
-                        updated_at
-                    )
-                    VALUES (
-                        $1,$2,'ESCROW_DEPOSIT',$3,$4,'SUCCESSFUL',$5,NOW(),NOW()
-                    )
-                    ON CONFLICT (reference_id) DO NOTHING
-                    `,
-                    [
-                        v.recipient_email,
-                        v.id,
-                        amount,
-                        v.currency,
-                        `FLW-BATCH-${flutterwaveTxId}-${v.id}`
-                    ]
-                );
-            }
-
-            await client.query('COMMIT');
-            return res.status(200).send('Batch processed');
+        if (v.status !== 'PENDING') {
+            console.log(`⏭ Skipping non-PENDING voucher ${v.id}`);
+            continue;
         }
+
+        const amount = Number(v.amount);
+        if (isNaN(amount) || amount <= 0) {
+            console.error(`Invalid amount on ${v.id}`);
+            continue;
+        }
+
+        // LOCK
+        await client.query(
+            `UPDATE vouchers SET status = 'LOCKED', locked_at = NOW(), updated_at = NOW() WHERE id = $1`,
+            [v.id]
+        );
+
+        // FUND ESCROW - more defensive
+        await client.query(
+            `INSERT INTO wallets (user_email, escrow_balance, available_balance, currency, updated_at)
+             VALUES ($1, ROUND($2::numeric, 2), 0, $3, NOW())
+             ON CONFLICT (user_email, currency) 
+             DO UPDATE SET 
+                escrow_balance = COALESCE(wallets.escrow_balance, 0) + ROUND(EXCLUDED.escrow_balance, 2),
+                updated_at = NOW()`,
+            [v.recipient_email, amount, v.currency]
+        );
+
+        // TRANSACTION LOG
+        await client.query(
+            `INSERT INTO transactions (...) VALUES (...) ON CONFLICT (reference_id) DO NOTHING`,
+            [v.recipient_email, v.id, amount, v.currency, `FLW-BATCH-\( {flutterwaveTxId}- \){v.id}`]
+        );
+
+        processed++;
+        console.log(`✅ Funded escrow for ${v.recipient_email} ${amount}`);
+    }
+
+    console.log(`🏁 Batch done - processed ${processed}`);
+    await client.query('COMMIT');
+    return res.status(200).send(`Batch processed: ${processed}`);
+}
 
         // =========================================================
         // SINGLE VOUCHER FLOW
