@@ -4,7 +4,6 @@ import { getClient } from '../db/index.js';
 const router = express.Router();
 
 router.post('/flutterwave', async (req, res) => {
-
     const secretHash = process.env.FLW_SECRET_HASH;
     const signature = req.headers['verif-hash'];
 
@@ -25,7 +24,6 @@ router.post('/flutterwave', async (req, res) => {
     let client;
 
     try {
-
         client = await getClient();
         await client.query('BEGIN');
         await client.query('SET search_path TO public');
@@ -40,18 +38,7 @@ router.post('/flutterwave', async (req, res) => {
         const status = payload.data.status?.toUpperCase() || 'FAILED';
         const flutterwaveTxId = String(payload.data.id);
 
-        //const batchRef = payload.data.meta?.parent_batch_ref || null;
-
-        const batchRefRaw = payload.data.meta?.parent_batch_ref || null;
-
-const batchRef = batchRefRaw
-    ? (batchRefRaw.startsWith("BATCH-")
-        ? batchRefRaw
-        : `BATCH-${batchRefRaw}`)
-    : null;
-
         console.log(`💳 WEBHOOK: ${txRef} | STATUS: ${status}`);
-
 
         if (!txRef) {
             await client.query('COMMIT');
@@ -66,82 +53,139 @@ const batchRef = batchRefRaw
             return res.status(200).send('Not successful');
         }
 
+        // -----------------------------
+        // CLEAN BATCH REF EXTRACTION
+        // -----------------------------
+        let batchRef = null;
+        const meta = payload.data.meta || {};
+
+        if (meta.parent_batch_ref) {
+            batchRef = String(meta.parent_batch_ref).trim();
+        } else if (meta.batch_ref) {
+            batchRef = String(meta.batch_ref).trim();
+        } else if (txRef && txRef.startsWith("BATCH-")) {
+            batchRef = txRef;   // fallback
+        }
+
+        console.log(`🔍 WEBHOOK received batchRef: "${batchRef}" | txRef: ${txRef}`);
+
         // =========================================================
         // BULK PAYMENT FLOW
         // =========================================================
         if (batchRef) {
-    console.log(`🔄 BULK WEBHOOK for \( {batchRef} | txRef= \){txRef} | FLW_ID=${flutterwaveTxId}`);
+            console.log(`🔄 Processing BULK for: ${batchRef}`);
 
-    const batchResult = await client.query(
-        `SELECT * FROM vouchers WHERE parent_batch_ref = $1 FOR UPDATE`,
-        [batchRef]
-    );
+            const batchResult = await client.query(
+                `
+                SELECT * FROM vouchers 
+                WHERE parent_batch_ref = $1 
+                FOR UPDATE
+                `,
+                [batchRef]
+            );
 
-    console.log(`📊 Found ${batchResult.rows.length} vouchers`);
+            console.log(`📊 Found ${batchResult.rows.length} vouchers for batch ${batchRef}`);
 
-    if (batchResult.rows.length === 0) {
-        console.warn(`❌ No matching vouchers for parent_batch_ref=${batchRef}`);
-        await client.query('COMMIT');
-        return res.status(200).send('Empty batch');
-    }
+            if (batchResult.rows.length === 0) {
+                console.warn(`⚠️ No vouchers found for batchRef: ${batchRef}`);
+                await client.query('COMMIT');
+                return res.status(200).send('Empty batch');
+            }
 
-    let processed = 0;
-    for (const v of batchResult.rows) {
-        console.log(`Voucher \( {v.id} status= \){v.status} email=\( {v.recipient_email} amount= \){v.amount}`);
+            let processed = 0;
 
-        if (v.status !== 'PENDING') {
-            console.log(`⏭ Skipping non-PENDING voucher ${v.id}`);
-            continue;
+            for (const v of batchResult.rows) {
+                if (v.status !== 'PENDING') {
+                    console.log(`⏭ Skipping ${v.id} (status: ${v.status})`);
+                    continue;
+                }
+
+                const amount = Number(v.amount);
+                if (isNaN(amount) || amount <= 0) {
+                    console.error(`Invalid amount for voucher ${v.id}`);
+                    continue;
+                }
+
+                // 1. LOCK VOUCHER
+                await client.query(
+                    `
+                    UPDATE vouchers
+                    SET status = 'LOCKED',
+                        locked_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = $1
+                    `,
+                    [v.id]
+                );
+
+                // 2. FUND ESCROW
+                await client.query(
+                    `
+                    INSERT INTO wallets (
+                        user_email,
+                        escrow_balance,
+                        available_balance,
+                        currency,
+                        updated_at
+                    )
+                    VALUES (
+                        $1,
+                        ROUND($2::numeric, 2),
+                        0,
+                        $3,
+                        NOW()
+                    )
+                    ON CONFLICT (user_email, currency)
+                    DO UPDATE SET
+                        escrow_balance = COALESCE(wallets.escrow_balance, 0) + ROUND(EXCLUDED.escrow_balance, 2),
+                        updated_at = NOW()
+                    `,
+                    [v.recipient_email, amount, v.currency]
+                );
+
+                // 3. TRANSACTION LOG
+                await client.query(
+                    `
+                    INSERT INTO transactions (
+                        user_email,
+                        voucher_id,
+                        transaction_type,
+                        amount,
+                        currency,
+                        status,
+                        reference_id,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        $1, $2, 'ESCROW_DEPOSIT', $3, $4, 'SUCCESSFUL', $5, NOW(), NOW()
+                    )
+                    ON CONFLICT (reference_id) DO NOTHING
+                    `,
+                    [
+                        v.recipient_email,
+                        v.id,
+                        amount,
+                        v.currency,
+                        `FLW-BATCH-\( {flutterwaveTxId}- \){v.id}`
+                    ]
+                );
+
+                processed++;
+                console.log(`✅ Funded escrow for ${v.recipient_email} | ${amount} ${v.currency}`);
+            }
+
+            console.log(`🏁 Batch ${batchRef} completed - ${processed} funded`);
+            await client.query('COMMIT');
+            return res.status(200).send(`Batch processed: ${processed}`);
         }
 
-        const amount = Number(v.amount);
-        if (isNaN(amount) || amount <= 0) {
-            console.error(`Invalid amount on ${v.id}`);
-            continue;
-        }
-
-        // LOCK
-        await client.query(
-            `UPDATE vouchers SET status = 'LOCKED', locked_at = NOW(), updated_at = NOW() WHERE id = $1`,
-            [v.id]
-        );
-
-        // FUND ESCROW - more defensive
-        await client.query(
-            `INSERT INTO wallets (user_email, escrow_balance, available_balance, currency, updated_at)
-             VALUES ($1, ROUND($2::numeric, 2), 0, $3, NOW())
-             ON CONFLICT (user_email, currency) 
-             DO UPDATE SET 
-                escrow_balance = COALESCE(wallets.escrow_balance, 0) + ROUND(EXCLUDED.escrow_balance, 2),
-                updated_at = NOW()`,
-            [v.recipient_email, amount, v.currency]
-        );
-
-        // TRANSACTION LOG
-        await client.query(
-            `INSERT INTO transactions (...) VALUES (...) ON CONFLICT (reference_id) DO NOTHING`,
-            [v.recipient_email, v.id, amount, v.currency, `FLW-BATCH-\( {flutterwaveTxId}- \){v.id}`]
-        );
-
-        processed++;
-        console.log(`✅ Funded escrow for ${v.recipient_email} ${amount}`);
-    }
-
-    console.log(`🏁 Batch done - processed ${processed}`);
-    await client.query('COMMIT');
-    return res.status(200).send(`Batch processed: ${processed}`);
-}
-
         // =========================================================
-        // SINGLE VOUCHER FLOW
+        // SINGLE VOUCHER FLOW (unchanged)
         // =========================================================
-
         const voucherResult = await client.query(
             `
-            SELECT *
-            FROM vouchers
-            WHERE id = $1
-            FOR UPDATE
+            SELECT * FROM vouchers WHERE id = $1 FOR UPDATE
             `,
             [txRef]
         );
@@ -175,75 +219,37 @@ const batchRef = batchRefRaw
         // 2. FUND ESCROW
         await client.query(
             `
-            INSERT INTO wallets (
-                user_email,
-                escrow_balance,
-                available_balance,
-                currency,
-                updated_at
-            )
-            VALUES (
-                $1,
-                ROUND($2::numeric,2),
-                0,
-                $3,
-                NOW()
-            )
-            ON CONFLICT (user_email, currency)
-            DO UPDATE SET
-                escrow_balance =
-                    wallets.escrow_balance +
-                    ROUND(EXCLUDED.escrow_balance,2),
+            INSERT INTO wallets (user_email, escrow_balance, available_balance, currency, updated_at)
+            VALUES ($1, ROUND($2::numeric, 2), 0, $3, NOW())
+            ON CONFLICT (user_email, currency) 
+            DO UPDATE SET 
+                escrow_balance = COALESCE(wallets.escrow_balance, 0) + ROUND(EXCLUDED.escrow_balance, 2),
                 updated_at = NOW()
             `,
-            [
-                v.recipient_email,
-                amount,
-                v.currency
-            ]
+            [v.recipient_email, amount, v.currency]
         );
 
         // 3. TRANSACTION LOG
         await client.query(
             `
             INSERT INTO transactions (
-                user_email,
-                voucher_id,
-                transaction_type,
-                amount,
-                currency,
-                status,
-                reference_id,
-                created_at,
-                updated_at
+                user_email, voucher_id, transaction_type, amount, currency, 
+                status, reference_id, created_at, updated_at
             )
-            VALUES (
-                $1,$2,'ESCROW_DEPOSIT',$3,$4,'SUCCESSFUL',$5,NOW(),NOW()
-            )
+            VALUES ($1,$2,'ESCROW_DEPOSIT',$3,$4,'SUCCESSFUL',$5,NOW(),NOW())
             ON CONFLICT (reference_id) DO NOTHING
             `,
-            [
-                v.recipient_email,
-                v.id,
-                amount,
-                v.currency,
-                `FLW-${flutterwaveTxId}`
-            ]
+            [v.recipient_email, v.id, amount, v.currency, `FLW-${flutterwaveTxId}`]
         );
 
         await client.query('COMMIT');
         return res.status(200).send('Webhook processed');
 
     } catch (err) {
-
         if (client) await client.query('ROLLBACK');
-
         console.error('❌ WEBHOOK ERROR:', err.message);
-
         return res.status(200).send('Handled error');
-
     } finally {
-
         if (client) client.release();
     }
 });
