@@ -9,13 +9,14 @@ import { query } from './db/index.js';
 import { 
     createBulkEscrow, 
     getBulkBatch, 
-    finalizeBatch, 
+    //finalizeBatch, 
     getBatchDetails, 
     releaseSingleVoucher, 
     releaseBatch, 
     disputeBatch, 
     disputeSingleVoucher 
 } from './controllers/bulkControllers.js';
+import { processBulkEscrowFunding } from './controllers/bulkSettlementWorker.js';
 
 // Import Routes
 import historyRoutes from './routes/history.js';
@@ -28,6 +29,7 @@ import adminRoutes from './routes/admin.js';
 import cronRoutes from './routes/cron.js'; 
 import converterRoutes from './routes/converter.js';
 import withdrawRoutes from './routes/withdraw.js';
+
 
 dotenv.config();
 
@@ -60,7 +62,7 @@ app.use('/api/cron', cronRoutes);
 // --- 3. Bulk & Escrow Operations ---
 app.post('/api/bulk/create', createBulkEscrow);
 app.get('/api/bulk/batch/:batchRef', getBulkBatch);
-app.post('/api/bulk/finalize', finalizeBatch);
+//app.post('/api/bulk/finalize', finalizeBatch);
 
 // New Secure Routes for Batch & Voucher Management
 app.get('/api/bulk/details/:batchRef', getBatchDetails);
@@ -87,6 +89,24 @@ app.get('/api/cron/cleanup', async (req, res) => {
         res.status(500).send("Cron execution failed");
     }
 });
+
+// --- 6. Bulk Escrow Settlement Worker ---
+setInterval(async () => {
+
+    try {
+
+        await processBulkEscrowFunding();
+
+    } catch (err) {
+
+        console.error(
+            '❌ BULK SETTLEMENT WORKER FAILURE:',
+            err.message
+        );
+
+    }
+
+}, 1000);
 
 if (process.env.NODE_ENV !== 'production') {
     const PORT = process.env.PORT || 4000;
