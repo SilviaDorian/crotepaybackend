@@ -1,44 +1,58 @@
 import { getClient } from '../db/index.js';
 
-export async function processBulkEscrowFunding() {
+export async function processBulkEscrowFunding(batchRef = null) {
 
     let client;
 
     try {
 
+        console.log('🚀 BULK WORKER START:', batchRef || 'ALL_BATCHES');
+
         client = await getClient();
-
         await client.query('BEGIN');
+        await client.query('SET search_path TO public');
 
-        /**
-         * Find all bulk vouchers that:
-         * - are LOCKED
-         * - belong to a batch
-         * - have not yet been funded
-         *
-         * FOR UPDATE SKIP LOCKED prevents duplicate funding
-         * when many workers run simultaneously.
-         */
-
-        const vouchersResult = await client.query(
+        // --------------------------------------------------
+        // STEP 1: FIND LOCKED VOUCHERS
+        // --------------------------------------------------
+        const result = await client.query(
             `
             SELECT *
             FROM public.vouchers
             WHERE
                 status = 'LOCKED'
                 AND parent_batch_ref IS NOT NULL
-                AND escrow_funded = FALSE
+                AND ($1::text IS NULL OR parent_batch_ref = $1)
             FOR UPDATE SKIP LOCKED
-            `
+            `,
+            [batchRef]
         );
 
-        for (const voucher of vouchersResult.rows) {
+        console.log(`📦 FOUND ${result.rows.length} LOCKED vouchers`);
+
+        for (const voucher of result.rows) {
+
+            console.log('TICK ➜', voucher.id);
 
             const amount = Number(voucher.amount);
+            const ref = `BULK-ESCROW-${voucher.id}`;
 
-            /**
-             * FUND RECIPIENT ESCROW WALLET
-             */
+            // --------------------------------------------------
+            // STEP 2: IDEMPOTENCY CHECK (transaction-based)
+            // --------------------------------------------------
+            const exists = await client.query(
+                `SELECT 1 FROM public.transactions WHERE reference_id = $1`,
+                [ref]
+            );
+
+            if (exists.rowCount > 0) {
+                console.log('SKIP (already funded):', voucher.id);
+                continue;
+            }
+
+            // --------------------------------------------------
+            // STEP 3: FUND ESCROW
+            // --------------------------------------------------
             await client.query(
                 `
                 INSERT INTO public.wallets
@@ -50,21 +64,11 @@ export async function processBulkEscrowFunding() {
                     updated_at
                 )
                 VALUES
-                (
-                    $1,
-                    $2,
-                    $3,
-                    0,
-                    NOW()
-                )
+                ($1,$2,$3,0,NOW())
 
                 ON CONFLICT (user_email, currency)
-
                 DO UPDATE SET
-
-                    escrow_balance =
-                        wallets.escrow_balance + EXCLUDED.escrow_balance,
-
+                    escrow_balance = wallets.escrow_balance + EXCLUDED.escrow_balance,
                     updated_at = NOW()
                 `,
                 [
@@ -74,9 +78,11 @@ export async function processBulkEscrowFunding() {
                 ]
             );
 
-            /**
-             * CREATE TRANSACTION RECORD
-             */
+            console.log('FUNDED ➜', voucher.recipient_email, amount);
+
+            // --------------------------------------------------
+            // STEP 4: TRANSACTION LOG
+            // --------------------------------------------------
             await client.query(
                 `
                 INSERT INTO public.transactions
@@ -93,65 +99,44 @@ export async function processBulkEscrowFunding() {
                     updated_at
                 )
                 VALUES
-                (
-                    $1,
-                    $2,
-                    'ESCROW_DEPOSIT',
-                    $3,
-                    $4,
-                    0,
-                    'SUCCESSFUL',
-                    $5,
-                    NOW(),
-                    NOW()
-                )
-
-                ON CONFLICT (reference_id)
-                DO NOTHING
+                ($1,$2,'ESCROW_DEPOSIT',$3,$4,0,'SUCCESSFUL',$5,NOW(),NOW())
+                ON CONFLICT (reference_id) DO NOTHING
                 `,
                 [
                     voucher.recipient_email,
                     voucher.id,
                     amount,
                     voucher.currency,
-                    `BULK-ESCROW-${voucher.id}`
+                    ref
                 ]
             );
 
-            /**
-             * MARK THIS VOUCHER AS ALREADY FUNDED
-             */
+            // --------------------------------------------------
+            // STEP 5: MARK PROCESSED (NO escrow_funded NEEDED)
+            // --------------------------------------------------
             await client.query(
                 `
                 UPDATE public.vouchers
                 SET
-                    escrow_funded = TRUE,
                     updated_at = NOW()
                 WHERE id = $1
                 `,
                 [voucher.id]
             );
-
         }
 
         await client.query('COMMIT');
 
+        console.log('✅ BULK WORKER DONE');
+
     } catch (err) {
 
-        if (client) {
-            await client.query('ROLLBACK');
-        }
+        if (client) await client.query('ROLLBACK');
 
-        console.error(
-            '❌ BULK SETTLEMENT WORKER ERROR:',
-            err.message
-        );
+        console.error('❌ BULK WORKER ERROR:', err.message);
 
     } finally {
 
-        if (client) {
-            client.release();
-        }
-
+        if (client) client.release();
     }
 }
