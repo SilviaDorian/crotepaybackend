@@ -1,11 +1,11 @@
 import { getClient } from '../db/index.js';
 
 export async function processBulkEscrowFunding(batchRef) {
+    console.log(`🚀 AUTO-SETTLER: Starting process for batch: ${batchRef}`);
     let client;
     try {
         client = await getClient();
 
-        // Use a loop to ensure we handle the batch safely
         const vouchersToFund = await client.query(
             `SELECT id, recipient_email, amount, currency 
              FROM vouchers 
@@ -16,12 +16,18 @@ export async function processBulkEscrowFunding(batchRef) {
             [batchRef]
         );
 
-        if (vouchersToFund.rows.length === 0) return;
+        console.log(`🔎 AUTO-SETTLER: Found ${vouchersToFund.rows.length} unfunded vouchers.`);
+
+        if (vouchersToFund.rows.length === 0) {
+            console.log(`✅ AUTO-SETTLER: Nothing to do for ${batchRef}.`);
+            return;
+        }
 
         for (const v of vouchersToFund.rows) {
+            console.log(`💰 AUTO-SETTLER: Funding ${v.recipient_email} (${v.amount} ${v.currency})`);
+            
             await client.query('BEGIN');
             
-            // Fund Wallet
             await client.query(
                 `INSERT INTO wallets (user_email, escrow_balance, currency, updated_at)
                  VALUES ($1, $2, $3, NOW())
@@ -30,7 +36,6 @@ export async function processBulkEscrowFunding(batchRef) {
                 [v.recipient_email, Number(v.amount), v.currency]
             );
 
-            // Create Transaction Record
             await client.query(
                 `INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id, created_at, updated_at)
                  VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, $4, 'SUCCESSFUL', $5, NOW(), NOW())`,
@@ -38,11 +43,11 @@ export async function processBulkEscrowFunding(batchRef) {
             );
 
             await client.query('COMMIT');
+            console.log(`✅ AUTO-SETTLER: Successfully funded ${v.id}`);
         }
-        console.log(`✅ Auto-funded ${vouchersToFund.rows.length} vouchers for ${batchRef}`);
 
     } catch (err) {
-        console.error(`❌ Auto-Settler Error:`, err);
+        console.error(`❌ AUTO-SETTLER CRITICAL ERROR:`, err);
     } finally {
         if (client) client.release();
     }
