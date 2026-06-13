@@ -1,5 +1,5 @@
 // run-worker.js
-import { processBulkEscrowFunding } from './services/bulsettlementworker.js'; // ← Change path if needed
+import { processBulkEscrowFunding } from './services/bulksettlementworker.js'; // ← Change path if needed
 
 async function main() {
     const batchRef = "BATCH-1781345883037-1952";   // ← Change if testing another batch
