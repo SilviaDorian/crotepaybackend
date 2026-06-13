@@ -1,7 +1,9 @@
-// src/routes/triggerBulkFunding.js
+import express from 'express';
 import { processBulkEscrowFunding } from '../controllers/bulkSettlementWorker.js';
 
-export async function triggerBulkFunding(req, res) {
+const router = express.Router();
+
+router.post('/trigger-bulk-funding', async (req, res) => {
     const { batchRef } = req.body;
 
     if (!batchRef || typeof batchRef !== 'string') {
@@ -30,4 +32,6 @@ export async function triggerBulkFunding(req, res) {
             error: err.message || 'Internal server error'
         });
     }
-}
+});
+
+export default router;
