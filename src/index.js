@@ -29,7 +29,7 @@ import adminRoutes from './routes/admin.js';
 import cronRoutes from './routes/cron.js'; 
 import converterRoutes from './routes/converter.js';
 import withdrawRoutes from './routes/withdraw.js';
-import triggerBulkFundingRouter from './routes/triggerBulkFunding.js';
+import triggerBulkFundingRoutes from './routes/triggerBulkFunding.js';
 
 
 dotenv.config();
@@ -59,7 +59,7 @@ app.use('/api/history', historyRoutes);
 app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes);
-app.use('/api', triggerBulkFundingRouter);
+app.use('/api/triggerBulkFunding', triggerBulkFundingRoutes);
 
 // --- 3. Bulk & Escrow Operations ---
 app.post('/api/bulk/create', createBulkEscrow);

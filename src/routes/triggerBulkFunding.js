@@ -3,6 +3,7 @@ import { processBulkEscrowFunding } from '../controllers/bulkSettlementWorker.js
 
 const router = express.Router();
 
+// Following your pattern: full path goes here
 router.post('/trigger-bulk-funding', async (req, res) => {
     const { batchRef } = req.body;
 
