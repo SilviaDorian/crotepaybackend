@@ -1,8 +1,8 @@
-// run-worker.js
-import { processBulkEscrowFunding } from './services/bulksettlementworker.js'; // ← Change path if needed
+// run-worker.js  (place this in the ROOT of your project)
+import { processBulkEscrowFunding } from './src/controllers/bulkSettlementWorker.js';
 
 async function main() {
-    const batchRef = "BATCH-1781345883037-1952";   // ← Change if testing another batch
+    const batchRef = "BATCH-1781345883037-1952";   // Change this if testing a different batch
 
     console.log(`🚀 Running worker for batch: ${batchRef}`);
     
