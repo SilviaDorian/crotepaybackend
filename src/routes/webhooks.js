@@ -31,6 +31,15 @@ async function creditEscrowWallet(client, voucher, flutterwaveTxId, isBatch = fa
          ON CONFLICT (reference_id) DO NOTHING`,
         [voucher.recipient_email, voucher.id, amount, voucher.currency, ref]
     );
+
+    // 🔥 CRITICAL: Mark voucher as funded (this was missing)
+    await client.query(
+        `UPDATE public.vouchers 
+         SET escrow_funded = true, 
+             updated_at = NOW() 
+         WHERE id = $1`,
+        [voucher.id]
+    );
 }
 
 router.post('/flutterwave', async (req, res) => {
@@ -68,7 +77,7 @@ router.post('/flutterwave', async (req, res) => {
         if (batchRef) {
             console.log(`🔄 WEBHOOK: Processing batch ${batchRef}`);
 
-            // Idempotency check for the entire batch
+            // Improved idempotency check
             const alreadyProcessed = await client.query(
                 `SELECT 1 FROM public.transactions 
                  WHERE reference_id LIKE $1 LIMIT 1`,
@@ -99,7 +108,7 @@ router.post('/flutterwave', async (req, res) => {
 
             console.log(`✅ Locked ${lockRes.rowCount} vouchers for batch ${batchRef}`);
 
-            // === FUNDING HAPPENS IN SAME TRANSACTION (critical fix) ===
+            // === FUNDING HAPPENS IN SAME TRANSACTION ===
             for (const voucher of lockRes.rows) {
                 await creditEscrowWallet(client, voucher, flutterwaveTxId, true);
             }
@@ -107,7 +116,7 @@ router.post('/flutterwave', async (req, res) => {
             processed = true;
             console.log(`💰 Batch ${batchRef} funded successfully`);
 
-            // Optional: Still trigger worker as extra safety net
+            // Optional safety net (uncomment if needed during testing)
             // processBulkEscrowFunding(batchRef).catch(console.error);
 
         } else if (txRef) {
@@ -140,7 +149,6 @@ router.post('/flutterwave', async (req, res) => {
     } catch (err) {
         if (client) await client.query('ROLLBACK');
         console.error('❌ WEBHOOK CRITICAL ERROR:', err);
-        // Always return 200 to prevent Flutterwave from retrying endlessly
         return res.status(200).send('Error logged - check server logs');
     } finally {
         if (client) client.release();
