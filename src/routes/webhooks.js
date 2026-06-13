@@ -1,6 +1,5 @@
 import express from 'express';
 import { getClient } from '../db/index.js';
-import { processBulkEscrowFunding } from '../src/controllers/bulkSettlementWorker.js';
 
 const router = express.Router();
 
@@ -33,11 +32,8 @@ router.post('/flutterwave', async (req, res) => {
 
             const lockRes = await client.query(
                 `UPDATE vouchers 
-                 SET status = 'LOCKED', 
-                     locked_at = NOW(), 
-                     updated_at = NOW() 
-                 WHERE parent_batch_ref = $1 
-                   AND status = 'PENDING'
+                 SET status = 'LOCKED', locked_at = NOW(), updated_at = NOW() 
+                 WHERE parent_batch_ref = $1 AND status = 'PENDING'
                  RETURNING id`,
                 [batchRef]
             );
@@ -46,37 +42,38 @@ router.post('/flutterwave', async (req, res) => {
 
             await client.query('COMMIT');
 
-            // 🔥 Direct trigger (better for Vercel serverless)
+            // Call the new trigger endpoint
             if (lockRes.rowCount > 0) {
-                console.log(`🚀 Triggering bulk worker for batch: ${batchRef}`);
-                
-                // Fire and forget
-                processBulkEscrowFunding(batchRef)
-                    .then(() => {
-                        console.log(`✅ Worker SUCCESS for batch ${batchRef}`);
-                    })
-                    .catch(err => {
-                        console.error(`❌ Worker FAILED for batch ${batchRef}:`, err.message);
-                    });
+                const baseUrl = process.env.VERCEL_URL 
+                    ? `https://${process.env.VERCEL_URL}` 
+                    : 'http://localhost:4000';   // Change port if needed
+
+                console.log(`📡 Triggering funding for batch ${batchRef}`);
+
+                fetch(`${baseUrl}/api/trigger-bulk-funding`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ batchRef })
+                })
+                .then(r => r.json())
+                .then(data => console.log('✅ Trigger response:', data))
+                .catch(err => console.error('⚠️ Trigger call failed (non-critical):', err.message));
             }
 
-            return res.status(200).send('Batch locked. Funding worker triggered.');
+            return res.status(200).send('Batch locked and funding triggered');
 
         } else if (txRef) {
-            // SINGLE VOUCHER FLOW (kept intact)
+            // SINGLE VOUCHER (kept as before)
             console.log(`🔄 Processing single voucher ${txRef}`);
 
             const voucherResult = await client.query(
-                `UPDATE vouchers 
-                 SET status = 'LOCKED', locked_at = NOW(), updated_at = NOW() 
-                 WHERE id = $1 AND status = 'PENDING' 
-                 RETURNING *`,
+                `UPDATE vouchers SET status = 'LOCKED', locked_at = NOW(), updated_at = NOW() 
+                 WHERE id = $1 AND status = 'PENDING' RETURNING *`,
                 [txRef]
             );
 
             if (voucherResult.rowCount > 0) {
                 const v = voucherResult.rows[0];
-
                 await client.query(
                     `INSERT INTO wallets (user_email, currency, escrow_balance, available_balance, awaiting_settlement, updated_at)
                      VALUES ($1, $2, $3, 0, 0, NOW())
@@ -86,25 +83,19 @@ router.post('/flutterwave', async (req, res) => {
                 );
 
                 await client.query(
-                    `INSERT INTO transactions 
-                     (user_email, voucher_id, transaction_type, amount, currency, status, reference_id, created_at, updated_at)
+                    `INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id, created_at, updated_at)
                      VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, $4, 'SUCCESSFUL', $5, NOW(), NOW())`,
                     [v.recipient_email, v.id, Number(v.amount), v.currency, `FLW-${String(payload.data.id)}`]
                 );
-
-                console.log(`✅ Single voucher ${txRef} funded directly`);
             }
 
             await client.query('COMMIT');
             return res.status(200).send('Single voucher processed');
         }
 
-        await client.query('COMMIT');
-        return res.status(200).send('No action needed');
-
     } catch (err) {
         if (client) await client.query('ROLLBACK');
-        console.error('❌ WEBHOOK CRITICAL ERROR:', err);
+        console.error('❌ WEBHOOK ERROR:', err);
         return res.status(200).send('Error logged');
     } finally {
         if (client) client.release();
