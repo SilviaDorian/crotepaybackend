@@ -16,7 +16,7 @@ async function creditEscrowWallet(client, voucher) {
         [voucher.recipient_email, voucher.currency.toUpperCase(), amount]
     );
 
-    // Transaction log
+    // Transaction log with idempotency
     await client.query(
         `INSERT INTO public.transactions 
          (user_email, voucher_id, transaction_type, amount, currency, status, reference_id, created_at, updated_at)
@@ -25,22 +25,27 @@ async function creditEscrowWallet(client, voucher) {
         [voucher.recipient_email, voucher.id, amount, voucher.currency, ref]
     );
 
-    // 🔥 IMPORTANT: Update the new column
+    // Mark as funded
     await client.query(
-        `UPDATE public.vouchers SET escrow_funded = true, updated_at = NOW() WHERE id = $1`,
+        `UPDATE public.vouchers 
+         SET escrow_funded = true, 
+             updated_at = NOW() 
+         WHERE id = $1`,
         [voucher.id]
     );
 }
 
 export async function processBulkEscrowFunding(batchRef = null) {
     let client;
+
     try {
-        console.log('🚀 BULK WORKER START for:', batchRef || 'ALL');
+        console.log(`🚀 BULK WORKER START for batch: ${batchRef || 'ALL_PENDING'}`);
 
         client = await getClient();
         await client.query('BEGIN');
         await client.query('SET search_path TO public');
 
+        // Find only unfunded locked vouchers for the specific batch
         const result = await client.query(
             `
             SELECT * FROM public.vouchers
@@ -53,23 +58,26 @@ export async function processBulkEscrowFunding(batchRef = null) {
             [batchRef]
         );
 
-        console.log(`Found ${result.rows.length} unfunded locked vouchers`);
+        console.log(`📦 Found ${result.rows.length} unfunded locked vouchers for batch ${batchRef}`);
+
+        let fundedCount = 0;
 
         for (const voucher of result.rows) {
             try {
                 await creditEscrowWallet(client, voucher);
-                console.log(`✅ FUNDED: ${voucher.recipient_email} | ${voucher.amount} ${voucher.currency}`);
+                fundedCount++;
+                console.log(`✅ FUNDED: ${voucher.recipient_email} | ${voucher.amount} ${voucher.currency} (${voucher.id})`);
             } catch (e) {
-                console.error(`Failed voucher ${voucher.id}:`, e.message);
+                console.error(`❌ Failed to fund voucher ${voucher.id}:`, e.message);
             }
         }
 
         await client.query('COMMIT');
-        console.log('✅ BULK WORKER DONE');
+        console.log(`✅ BULK WORKER COMPLETED for ${batchRef} | Funded ${fundedCount} vouchers`);
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
-        console.error('❌ BULK WORKER ERROR:', err);
+        console.error('❌ BULK WORKER CRITICAL ERROR:', err.message);
     } finally {
         if (client) client.release();
     }
