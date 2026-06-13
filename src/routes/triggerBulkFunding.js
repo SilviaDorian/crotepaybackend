@@ -5,7 +5,7 @@ const router = express.Router();
 
 console.log('🚀 [BOOT] triggerBulkFunding.js file loaded');
 
-// Middleware-level logger (runs before route handler)
+// Middleware-level logger
 router.use((req, res, next) => {
     console.log('📥 [ROUTER HIT]', {
         method: req.method,
@@ -16,11 +16,11 @@ router.use((req, res, next) => {
     next();
 });
 
-console.log('🧩 [INIT] Registering POST /trigger-bulk-funding route');
+console.log('🧩 [INIT] Registering POST /bulk/trigger-funding route');
 
-// Route
-router.post('/trigger-bulk-funding', async (req, res) => {
-    console.log('⚡ [ROUTE HIT] POST /trigger-bulk-funding reached');
+// ✅ UPDATED ROUTE (matches your system pattern)
+router.post('/bulk/trigger-funding', async (req, res) => {
+    console.log('⚡ [ROUTE HIT] POST /bulk/trigger-funding reached');
 
     const { batchRef } = req.body;
 
@@ -58,7 +58,7 @@ router.post('/trigger-bulk-funding', async (req, res) => {
     }
 });
 
-// Catch-all route inside router (VERY useful for debugging wrong paths)
+// Catch-all debug
 router.use((req, res) => {
     console.warn('🚨 [ROUTE NOT FOUND INSIDE MODULE]', {
         method: req.method,

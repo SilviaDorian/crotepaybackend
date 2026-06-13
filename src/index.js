@@ -9,7 +9,6 @@ import { query } from './db/index.js';
 import {
     createBulkEscrow,
     getBulkBatch,
-    //finalizeBatch,
     getBatchDetails,
     releaseSingleVoucher,
     releaseBatch,
@@ -17,9 +16,7 @@ import {
     disputeSingleVoucher
 } from './controllers/bulkControllers.js';
 
-import { processBulkEscrowFunding } from './controllers/bulkSettlementWorker.js';
-
-// Import Routes
+// Routes
 import historyRoutes from './routes/history.js';
 import revenueRoutes from './routes/revenue.js';
 import webhookRoutes from './routes/webhooks.js';
@@ -37,7 +34,7 @@ dotenv.config();
 const app = express();
 const OWNER_EMAIL = 'deepxverified@gmail.com';
 
-// --- 1. Security & Logging Middleware ---
+// --- Security & Logging ---
 app.use(
     helmet({
         crossOriginResourcePolicy: { policy: 'cross-origin' }
@@ -60,7 +57,7 @@ app.use(
 app.use(morgan('dev'));
 app.use(express.json());
 
-// --- 2. Routes ---
+// --- Routes ---
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/vouchers', voucherRoutes);
@@ -72,22 +69,19 @@ app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes);
 
-// Updated route mount
+// ✅ Bulk funding route (clean & unified)
 app.use('/api', triggerBulkFundingRoutes);
 
-// --- 3. Bulk & Escrow Operations ---
+// --- Bulk Operations ---
 app.post('/api/bulk/create', createBulkEscrow);
 app.get('/api/bulk/batch/:batchRef', getBulkBatch);
-// app.post('/api/bulk/finalize', finalizeBatch);
-
-// Secure Routes for Batch & Voucher Management
 app.get('/api/bulk/details/:batchRef', getBatchDetails);
 app.post('/api/vouchers/release', releaseSingleVoucher);
 app.post('/api/vouchers/dispute', disputeSingleVoucher);
 app.post('/api/bulk/release', releaseBatch);
 app.post('/api/bulk/dispute', disputeBatch);
 
-// --- 4. Status Route ---
+// --- Status ---
 app.get('/', (req, res) => {
     res.json({
         status: 'Online',
@@ -96,7 +90,7 @@ app.get('/', (req, res) => {
     });
 });
 
-// --- 5. Inline Cron Logic ---
+// --- Cron cleanup ---
 app.get('/api/cron/cleanup', async (req, res) => {
     try {
         await query(`
@@ -112,15 +106,12 @@ app.get('/api/cron/cleanup', async (req, res) => {
     }
 });
 
-// --- 6. Bulk Escrow Settlement Worker ---
+// --- Worker loop ---
 setInterval(async () => {
     try {
         await processBulkEscrowFunding();
     } catch (err) {
-        console.error(
-            '❌ BULK SETTLEMENT WORKER FAILURE:',
-            err.message
-        );
+        console.error('❌ BULK SETTLEMENT WORKER FAILURE:', err.message);
     }
 }, 3000);
 
