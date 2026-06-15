@@ -71,8 +71,8 @@ app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes);
 
-// ✅ Standardized Router Prefix to match: /api/bulk/trigger-funding
-app.use('/api/bulk', triggerBulkFundingRoutes);
+// ✅ Bulk funding route matching your exact layout
+app.use('/api', triggerBulkFundingRoutes);
 
 // --- Bulk Operations ---
 app.post('/api/bulk/create', createBulkEscrow);
