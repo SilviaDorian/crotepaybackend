@@ -16,7 +16,9 @@ import {
     disputeSingleVoucher
 } from './controllers/bulkControllers.js';
 
-// Routes
+import { processBulkEscrowFunding } from './controllers/bulkSettlementWorker.js';
+
+// Import Routes
 import historyRoutes from './routes/history.js';
 import revenueRoutes from './routes/revenue.js';
 import webhookRoutes from './routes/webhooks.js';
@@ -69,8 +71,8 @@ app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes);
 
-// ✅ Bulk funding route (clean & unified)
-app.use('/api', triggerBulkFundingRoutes);
+// ✅ Standardized Router Prefix to match: /api/bulk/trigger-funding
+app.use('/api/bulk', triggerBulkFundingRoutes);
 
 // --- Bulk Operations ---
 app.post('/api/bulk/create', createBulkEscrow);
