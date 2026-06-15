@@ -18,7 +18,7 @@ import {
 
 import { processBulkEscrowFunding } from './controllers/bulkSettlementWorker.js';
 
-// Import Routes
+// Import Routes (Note: Removed batchProcessorRoutes to prevent conflict)
 import historyRoutes from './routes/history.js';
 import revenueRoutes from './routes/revenue.js';
 import webhookRoutes from './routes/webhooks.js';
@@ -29,37 +29,41 @@ import adminRoutes from './routes/admin.js';
 import cronRoutes from './routes/cron.js';
 import converterRoutes from './routes/converter.js';
 import withdrawRoutes from './routes/withdraw.js';
-import batchProcessorRoutes from './routes/batchProcessor.js';
 
 dotenv.config();
 
 const app = express();
-const OWNER_EMAIL = 'deepxverified@gmail.com';
 
 // --- Security & Logging ---
-app.use(
-    helmet({
-        crossOriginResourcePolicy: { policy: 'cross-origin' }
-    })
-);
-
-app.use(
-    cors({
-        origin: [
-            'https://fielpay.free.nf',
-            'http://fielpay.free.nf',
-            'http://localhost:3000'
-        ],
-        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'verif-hash'],
-        credentials: true
-    })
-);
-
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+app.use(cors({
+    origin: ['https://fielpay.free.nf', 'http://fielpay.free.nf', 'http://localhost:3000'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'verif-hash'],
+    credentials: true
+}));
 app.use(morgan('dev'));
 app.use(express.json());
 
-// --- Routes ---
+// --- ROUTES: Priority Direct Route ---
+// Placed at the top to ensure it is registered before any middleware routers
+app.post('/api/batch/process', async (req, res) => {
+    console.log("⚡ [DIRECT CORE ROUTE] Received automatic request for batch:", req.body.batchRef);
+    const { batchRef } = req.body;
+    
+    if (!batchRef || typeof batchRef !== 'string') {
+        return res.status(400).json({ success: false, error: "Invalid batch reference." });
+    }
+
+    // Fire-and-forget: Start process, respond to frontend immediately
+    processBulkEscrowFunding(batchRef)
+        .then(() => console.log(`✅ [BG WORKER] Batch ${batchRef} processed.`))
+        .catch((err) => console.error(`❌ [BG WORKER] Batch ${batchRef} failed:`, err.message));
+
+    return res.status(200).json({ success: true, message: "Sequence initiated." });
+});
+
+// --- Standard Routes ---
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/vouchers', voucherRoutes);
@@ -70,36 +74,6 @@ app.use('/api/history', historyRoutes);
 app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes);
-app.use('/api/batch', batchProcessorRoutes);
-
-// ✅ DIRECT ROUTE PATCH (Bypasses router file matching errors on Vercel)
-app.post('/api/batch/process', async (req, res) => {
-    console.log("⚡ [DIRECT CORE ROUTE] Received automatic request for batch:", req.body.batchRef);
-    
-    const { batchRef } = req.body;
-    
-    if (!batchRef || typeof batchRef !== 'string') {
-        return res.status(400).json({ 
-            success: false, 
-            error: "batchRef is required and must be a valid string structural context." 
-        });
-    }
-
-    // Execute ledger mutations in the background to bypass Vercel's Serverless Timeout constraints
-    processBulkEscrowFunding(batchRef)
-        .then(() => {
-            console.log(`✅ [BG WORKER SUCCESS] Successfully finished background processing for batch: ${batchRef}`);
-        })
-        .catch((err) => {
-            console.error(`❌ [BG WORKER FAILURE] Error executing background process for batch: ${batchRef}`, err.message);
-        });
-
-    // Instantly return safe confirmation status payload back to fundescrow.html
-    return res.status(200).json({ 
-        success: true, 
-        message: "Bulk escrow funding background sequence successfully initiated." 
-    });
-});
 
 // --- Bulk Operations ---
 app.post('/api/bulk/create', createBulkEscrow);
@@ -110,46 +84,17 @@ app.post('/api/vouchers/dispute', disputeSingleVoucher);
 app.post('/api/bulk/release', releaseBatch);
 app.post('/api/bulk/dispute', disputeBatch);
 
-// --- Status ---
-app.get('/', (req, res) => {
-    res.json({
-        status: 'Online',
-        project: 'FielPay Escrow Engine',
-        version: '1.5.0'
-    });
-});
+// --- Default Healthcheck ---
+app.get('/', (req, res) => res.json({ status: 'Online', project: 'FielPay', version: '1.5.0' }));
 
-// --- Cron cleanup ---
-app.get('/api/cron/cleanup', async (req, res) => {
-    try {
-        await query(`
-            UPDATE vouchers
-            SET status = 'DISPUTED'
-            WHERE status = 'LOCKED'
-            AND expires_at <= NOW()
-        `);
-
-        res.status(200).send('Cleanup successful');
-    } catch (err) {
-        res.status(500).send('Cron execution failed');
-    }
-});
-
-// --- Worker loop ---
+// --- Worker Loop & Server Start ---
 setInterval(async () => {
-    try {
-        await processBulkEscrowFunding();
-    } catch (err) {
-        console.error('❌ BULK SETTLEMENT WORKER FAILURE:', err.message);
-    }
+    try { await processBulkEscrowFunding(); } catch (err) { console.error('❌ Worker loop error:', err.message); }
 }, 3000);
 
 if (process.env.NODE_ENV !== 'production') {
     const PORT = process.env.PORT || 4000;
-
-    app.listen(PORT, '0.0.0.0', () => {
-        console.log(`🚀 Local Development Active on Port ${PORT}`);
-    });
+    app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Development Active on Port ${PORT}`));
 }
 
 export default app;
