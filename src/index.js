@@ -70,7 +70,7 @@ app.use('/api/history', historyRoutes);
 app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes);
-app.use('/api/batch', batchProcessorRoutes);
+app.use('/api/process', batchProcessorRoutes);
 
 // --- Bulk Operations ---
 app.post('/api/bulk/create', createBulkEscrow);
