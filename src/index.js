@@ -29,7 +29,8 @@ import adminRoutes from './routes/admin.js';
 import cronRoutes from './routes/cron.js';
 import converterRoutes from './routes/converter.js';
 import withdrawRoutes from './routes/withdraw.js';
-import batchRoutes from './routes/batch.js';
+import ledgerTriggerRoutes from './routes/ledgerTrigger.js';
+//import batchRoutes from './routes/batch.js';
 
 dotenv.config();
 
@@ -70,7 +71,8 @@ app.use('/api/history', historyRoutes);
 app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes);
-app.use('/api/process', batchRoutes);
+app.use('/api/settle-clearance', ledgerTriggerRoutes);
+//app.use('/api/process', batchRoutes);
 
 // --- Bulk Operations ---
 app.post('/api/bulk/create', createBulkEscrow);
