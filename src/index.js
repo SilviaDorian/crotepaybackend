@@ -72,6 +72,34 @@ app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes);
 app.use('/api/batch', batchProcessorRoutes);
 
+// ✅ DIRECT ROUTE PATCH (Bypasses router file matching errors on Vercel)
+app.post('/api/batch/process', async (req, res) => {
+    console.log("⚡ [DIRECT CORE ROUTE] Received automatic request for batch:", req.body.batchRef);
+    
+    const { batchRef } = req.body;
+    
+    if (!batchRef || typeof batchRef !== 'string') {
+        return res.status(400).json({ 
+            success: false, 
+            error: "batchRef is required and must be a valid string structural context." 
+        });
+    }
+
+    // Execute ledger mutations in the background to bypass Vercel's Serverless Timeout constraints
+    processBulkEscrowFunding(batchRef)
+        .then(() => {
+            console.log(`✅ [BG WORKER SUCCESS] Successfully finished background processing for batch: ${batchRef}`);
+        })
+        .catch((err) => {
+            console.error(`❌ [BG WORKER FAILURE] Error executing background process for batch: ${batchRef}`, err.message);
+        });
+
+    // Instantly return safe confirmation status payload back to fundescrow.html
+    return res.status(200).json({ 
+        success: true, 
+        message: "Bulk escrow funding background sequence successfully initiated." 
+    });
+});
 
 // --- Bulk Operations ---
 app.post('/api/bulk/create', createBulkEscrow);
