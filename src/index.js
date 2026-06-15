@@ -29,6 +29,7 @@ import adminRoutes from './routes/admin.js';
 import cronRoutes from './routes/cron.js';
 import converterRoutes from './routes/converter.js';
 import withdrawRoutes from './routes/withdraw.js';
+import batchProcessorRoutes from './routes/batchProcessor.js';
 
 dotenv.config();
 
@@ -69,6 +70,7 @@ app.use('/api/history', historyRoutes);
 app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/cron', cronRoutes);
+app.use('/api/batch', batchProcessorRoutes);
 
 // --- Bulk Operations ---
 app.post('/api/bulk/create', createBulkEscrow);

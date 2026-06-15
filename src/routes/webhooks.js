@@ -1,28 +1,8 @@
 import express from 'express';
 import { getClient } from '../db/index.js';
-import { processBulkEscrowFunding } from '../controllers/bulkSettlementWorker.js';
 
 const router = express.Router();
 
-// ✅ OPTION 1 FIX: Stable Endpoint under the working /api/webhooks namespace
-// Full Path: POST /api/webhooks/trigger-funding
-router.post('/trigger-funding', async (req, res) => {
-    console.log("⚡ [WEBHOOK ROUTE TRIGGER] Received funding sequence initialization:", req.body.batchRef);
-    const { batchRef } = req.body;
-
-    if (!batchRef || typeof batchRef !== 'string') {
-        return res.status(400).json({ success: false, error: "Invalid batch reference string context." });
-    }
-
-    // Execute in background to shield processing from Vercel's strict gateway timeouts
-    processBulkEscrowFunding(batchRef)
-        .then(() => console.log(`✅ [BG WORKER SUCCESS] Batch processing finished via Webhook Proxy for: ${batchRef}`))
-        .catch((err) => console.error(`❌ [BG WORKER FAILURE] Processing failed via Webhook Proxy:`, err.message));
-
-    return res.status(200).json({ success: true, message: "Bulk background funding successfully initiated." });
-});
-
-// --- Flutterwave Event Webhook Handler ---
 router.post('/flutterwave', async (req, res) => {
     const secretHash = process.env.FLW_SECRET_HASH;
     const signature = req.headers['verif-hash'];
@@ -62,15 +42,15 @@ router.post('/flutterwave', async (req, res) => {
 
             await client.query('COMMIT');
 
-            // ✅ INTERNAL TRIGGER RESOLUTION: Points to our newly structured stable endpoint route
+            // Call the new trigger endpoint
             if (lockRes.rowCount > 0) {
                 const baseUrl = process.env.VERCEL_URL 
                     ? `https://${process.env.VERCEL_URL}` 
-                    : 'http://localhost:4000';
+                    : 'http://localhost:4000';   // Change port if needed
 
                 console.log(`📡 Triggering funding for batch ${batchRef}`);
 
-                fetch(`${baseUrl}/api/webhooks/trigger-funding`, {
+                fetch(`${baseUrl}/api/trigger-bulk-funding`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ batchRef })
@@ -83,7 +63,7 @@ router.post('/flutterwave', async (req, res) => {
             return res.status(200).send('Batch locked and funding triggered');
 
         } else if (txRef) {
-            // SINGLE VOUCHER (kept completely as before)
+            // SINGLE VOUCHER (kept as before)
             console.log(`🔄 Processing single voucher ${txRef}`);
 
             const voucherResult = await client.query(
