@@ -26,11 +26,9 @@ import userRoutes from './routes/users.js';
 import voucherRoutes from './routes/vouchers.js';
 import walletRoutes from './routes/wallets.js';
 import adminRoutes from './routes/admin.js';
-import cronRoutes from './routes/cron.js';
 import converterRoutes from './routes/converter.js';
 import withdrawRoutes from './routes/withdraw.js';
 import ledgerTriggerRoutes from './routes/ledgerTrigger.js';
-//import batchRoutes from './routes/batch.js';
 
 dotenv.config();
 
@@ -70,9 +68,7 @@ app.use('/api/converter', converterRoutes);
 app.use('/api/history', historyRoutes);
 app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
-app.use('/api/cron', cronRoutes);
 app.use('/api/settle-clearance', ledgerTriggerRoutes);
-//app.use('/api/process', batchRoutes);
 
 // --- Bulk Operations ---
 app.post('/api/bulk/create', createBulkEscrow);
@@ -91,31 +87,6 @@ app.get('/', (req, res) => {
         version: '1.5.0'
     });
 });
-
-// --- Cron cleanup ---
-app.get('/api/cron/cleanup', async (req, res) => {
-    try {
-        await query(`
-            UPDATE vouchers
-            SET status = 'DISPUTED'
-            WHERE status = 'LOCKED'
-            AND expires_at <= NOW()
-        `);
-
-        res.status(200).send('Cleanup successful');
-    } catch (err) {
-        res.status(500).send('Cron execution failed');
-    }
-});
-
-// --- Worker loop ---
-setInterval(async () => {
-    try {
-        await processBulkEscrowFunding();
-    } catch (err) {
-        console.error('❌ BULK SETTLEMENT WORKER FAILURE:', err.message);
-    }
-}, 3000);
 
 if (process.env.NODE_ENV !== 'production') {
     const PORT = process.env.PORT || 4000;
