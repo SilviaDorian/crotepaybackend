@@ -114,7 +114,7 @@ export async function releaseSingleVoucher(req, res) {
         await client.query('BEGIN');
 
         const vResult = await client.query(
-            "SELECT * FROM public.vouchers WHERE id = $1 FOR UPDATE",
+            "SELECT *, (EXTRACT(EPOCH FROM (NOW() - COALESCE(locked_at, created_at))) / 3600) >= 72 as is_over_72 FROM public.vouchers WHERE id = $1 FOR UPDATE",
             [voucher_id]
         );
 
@@ -126,11 +126,7 @@ export async function releaseSingleVoucher(req, res) {
             throw new Error("Voucher not in locked status.");
 
         const amount = parseFloat(v.amount);
-
-        const targetColumn =
-            (new Date() - new Date(v.locked_at || v.created_at)) / (1000 * 60 * 60) >= 72
-                ? 'available_balance'
-                : 'awaiting_settlement';
+        const targetColumn = v.is_over_72 ? 'available_balance' : 'awaiting_settlement';
 
         await client.query(
             "UPDATE public.wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3",
@@ -214,7 +210,7 @@ export async function releaseBatch(req, res) {
         }
 
         const vResult = await client.query(
-            "SELECT * FROM public.vouchers WHERE parent_batch_ref = $1 FOR UPDATE",
+            "SELECT *, (EXTRACT(EPOCH FROM (NOW() - COALESCE(locked_at, created_at))) / 3600) >= 72 as is_over_72 FROM public.vouchers WHERE parent_batch_ref = $1 FOR UPDATE",
             [batchRef]
         );
 
@@ -230,11 +226,7 @@ export async function releaseBatch(req, res) {
             if (v.status !== 'LOCKED') continue;
 
             const amount = parseFloat(v.amount);
-
-            const targetColumn =
-                (new Date() - new Date(v.locked_at || v.created_at)) / (1000 * 60 * 60) >= 72
-                    ? 'available_balance'
-                    : 'awaiting_settlement';
+            const targetColumn = v.is_over_72 ? 'available_balance' : 'awaiting_settlement';
 
             await client.query(
                 "UPDATE public.wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3",
