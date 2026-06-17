@@ -15,7 +15,6 @@ import {
     disputeBatch,
     disputeSingleVoucher
 } from './controllers/bulkControllers.js';
-
 import { processBulkEscrowFunding } from './controllers/bulkSettlementWorker.js';
 
 // Import Routes
@@ -41,19 +40,29 @@ app.use(helmet({
 
 // --- CORS Configuration ---
 const corsOptions = {
-    origin: [
-        'https://fielpay.free.nf',
-        'http://fielpay.free.nf',
-        'http://localhost:3000'
-    ],
+    origin: function (origin, callback) {
+        const allowedOrigins = [
+            'https://fielpay.free.nf',
+            'http://fielpay.free.nf',
+            'http://localhost:3000'
+        ];
+        
+        // Allow requests with no origin (like mobile apps, Postman, etc.)
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'verif-hash'],
     credentials: true,
-    optionsSuccessStatus: 200 
+    optionsSuccessStatus: 200
 };
 
 app.use(cors(corsOptions));
-// This ensures that all OPTIONS requests are handled by the cors middleware immediately
+
+// Handle OPTIONS preflight requests explicitly
 app.options('*', cors(corsOptions));
 
 app.use(morgan('dev'));
