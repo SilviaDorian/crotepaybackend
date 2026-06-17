@@ -35,39 +35,34 @@ dotenv.config();
 const app = express();
 const OWNER_EMAIL = 'deepxverified@gmail.com';
 
-/* =========================================================
-   SECURITY + CORS (FIXED FOR VERCEL + BROWSERS)
-========================================================= */
-
-const corsOptions = {
-    origin: [
-        'https://fielpay.free.nf',
-        'http://fielpay.free.nf',
-        'http://localhost:3000'
-    ],
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'verif-hash'],
-    credentials: true
-};
-
-app.use(cors(corsOptions));
-
-// IMPORTANT: Handle preflight requests explicitly
-app.options('*', cors(corsOptions));
-
+// --- Security & Logging ---
 app.use(
     helmet({
         crossOriginResourcePolicy: { policy: 'cross-origin' }
     })
 );
 
+// Enable CORS with preflight handling
+app.use(
+    cors({
+        origin: [
+            'https://fielpay.free.nf',
+            'http://fielpay.free.nf',
+            'http://localhost:3000'
+        ],
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'verif-hash'],
+        credentials: true
+    })
+);
+
+// Explicitly handle all preflight OPTIONS requests
+app.options('*', cors());
+
 app.use(morgan('dev'));
 app.use(express.json());
 
-/* =========================================================
-   ROUTES
-========================================================= */
-
+// --- Routes ---
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/vouchers', voucherRoutes);
@@ -79,10 +74,7 @@ app.use('/api/wallets', walletRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/settle-clearance', ledgerTriggerRoutes);
 
-/* =========================================================
-   BULK OPERATIONS
-========================================================= */
-
+// --- Bulk Operations ---
 app.post('/api/bulk/create', createBulkEscrow);
 app.get('/api/bulk/batch/:batchRef', getBulkBatch);
 app.get('/api/bulk/details/:batchRef', getBatchDetails);
@@ -91,10 +83,7 @@ app.post('/api/vouchers/dispute', disputeSingleVoucher);
 app.post('/api/bulk/release', releaseBatch);
 app.post('/api/bulk/dispute', disputeBatch);
 
-/* =========================================================
-   STATUS
-========================================================= */
-
+// --- Status ---
 app.get('/', (req, res) => {
     res.json({
         status: 'Online',
@@ -103,13 +92,8 @@ app.get('/', (req, res) => {
     });
 });
 
-/* =========================================================
-   LOCAL DEV ONLY
-========================================================= */
-
 if (process.env.NODE_ENV !== 'production') {
     const PORT = process.env.PORT || 4000;
-
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`🚀 Local Development Active on Port ${PORT}`);
     });
