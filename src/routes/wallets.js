@@ -93,4 +93,21 @@ router.get('/history/:email', async (req, res) => {
     }
 });
 
+router.get('/vouchers/awaiting/:email', async (req, res) => {
+    try {
+        const { email } = req.params;
+        const result = await query(
+            `SELECT * FROM public.vouchers 
+             WHERE recipient_email = $1 
+             AND status IN ('LOCKED', 'RELEASED') 
+             AND (NOW() - locked_at) < INTERVAL '72 hours'
+             ORDER BY locked_at ASC`,
+            [email]
+        );
+        res.json({ vouchers: result.rows });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch awaiting vouchers." });
+    }
+});
+
 export default router;
