@@ -15,6 +15,7 @@ import {
     disputeBatch,
     disputeSingleVoucher
 } from './controllers/bulkControllers.js';
+
 import { processBulkEscrowFunding } from './controllers/bulkSettlementWorker.js';
 
 // Import Routes
@@ -32,40 +33,17 @@ import ledgerTriggerRoutes from './routes/ledgerTrigger.js';
 dotenv.config();
 
 const app = express();
+const OWNER_EMAIL = 'deepxverified@gmail.com';
 
-// --- Security & Logging ---
-app.use(helmet({
-    crossOriginResourcePolicy: { policy: 'cross-origin' }
-}));
-
-// --- CORS Configuration ---
-const corsOptions = {
-    origin: function (origin, callback) {
-        const allowedOrigins = [
-            'https://fielpay.free.nf',
-            'http://fielpay.free.nf',
-            'http://localhost:3000'
-        ];
-        
-        // Allow requests with no origin (like mobile apps, Postman, etc.)
-        if (!origin || allowedOrigins.includes(origin)) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
+// --- 1. Security & Logging Middleware ---
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
+app.use(cors({
+    origin: ['https://fielpay.free.nf', 'http://fielpay.free.nf', 'http://localhost:3000'],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'verif-hash'],
-    credentials: true,
-    optionsSuccessStatus: 200
-};
-
-app.use(cors(corsOptions));
-
-// Handle OPTIONS preflight requests explicitly
-app.options('*', cors(corsOptions));
-
-app.use(morgan('dev'));
+    credentials: true
+}));
+app.use(morgan('dev')); 
 app.use(express.json());
 
 // --- Routes ---
@@ -100,6 +78,7 @@ app.get('/', (req, res) => {
 
 if (process.env.NODE_ENV !== 'production') {
     const PORT = process.env.PORT || 4000;
+
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`🚀 Local Development Active on Port ${PORT}`);
     });
