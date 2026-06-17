@@ -10,5 +10,7 @@
     "api/index.js": {
       "includeFiles": "src/**"
     }
-  }
+  },
+  "cleanUrls": true,
+  "trailingSlash": false
 }
