@@ -4,24 +4,22 @@ import { processBulkEscrowFunding } from '../controllers/bulkSettlementWorker.js
 const router = express.Router();
 
 router.post('/execute', async (req, res) => {
-    console.log("🚀 Ledger trigger started");
+    const { batchRef } = req.body;
+    console.log(`DEBUG: Settlement execution started for batch: ${batchRef || 'ALL'}`);
 
     try {
-        await processBulkEscrowFunding(); // 🔥 THIS WAS MISSING
-
-        console.log("✅ Bulk settlement completed");
-
-        return res.status(200).json({
-            success: true,
-            message: "Bulk escrow funding completed"
+        // Execute the worker logic directly
+        await processBulkEscrowFunding(batchRef);
+        
+        return res.status(200).json({ 
+            success: true, 
+            message: "Settlement process completed successfully." 
         });
-
-    } catch (err) {
-        console.error("❌ Ledger trigger failed:", err.message);
-
-        return res.status(500).json({
-            success: false,
-            message: "Settlement failed"
+    } catch (error) {
+        console.error("CRITICAL: Settlement execution failed:", error);
+        return res.status(500).json({ 
+            success: false, 
+            message: "Settlement failed: " + error.message 
         });
     }
 });
