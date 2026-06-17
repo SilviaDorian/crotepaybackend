@@ -12,6 +12,7 @@ router.post('/flutterwave', async (req, res) => {
     }
 
     const payload = req.body;
+
     if (!payload?.data || payload.event !== 'charge.completed' || 
         payload.data.status?.toUpperCase() !== 'SUCCESSFUL') {
         return res.status(200).send('Ignored');
@@ -22,11 +23,17 @@ router.post('/flutterwave', async (req, res) => {
                     (txRef?.startsWith("BATCH-") ? txRef : null);
 
     let client;
+
     try {
         client = await getClient();
         await client.query('BEGIN');
         await client.query('SET search_path TO public');
 
+        /**
+         * =========================
+         * BULK / BATCH LOGIC (LOCK ONLY)
+         * =========================
+         */
         if (batchRef) {
             console.log(`🔄 WEBHOOK: Locking batch ${batchRef}`);
 
@@ -42,48 +49,45 @@ router.post('/flutterwave', async (req, res) => {
 
             await client.query('COMMIT');
 
-            // Call the new trigger endpoint
-            if (lockRes.rowCount > 0) {
-                const baseUrl = process.env.VERCEL_URL 
-                    ? `https://${process.env.VERCEL_URL}` 
-                    : 'http://localhost:4000';   // Change port if needed
+            // ❌ IMPORTANT: NO FUNDING TRIGGER HERE
+            // Frontend (allocating-funds.html) handles funding
 
-                console.log(`📡 Triggering funding for batch ${batchRef}`);
+            return res.status(200).send('Batch locked successfully');
+        }
 
-                fetch(`${baseUrl}/api/trigger-bulk-funding`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ batchRef })
-                })
-                .then(r => r.json())
-                .then(data => console.log('✅ Trigger response:', data))
-                .catch(err => console.error('⚠️ Trigger call failed (non-critical):', err.message));
-            }
-
-            return res.status(200).send('Batch locked and funding triggered');
-
-        } else if (txRef) {
-            // SINGLE VOUCHER (kept as before)
+        /**
+         * =========================
+         * SINGLE VOUCHER LOGIC (UNCHANGED)
+         * =========================
+         */
+        else if (txRef) {
             console.log(`🔄 Processing single voucher ${txRef}`);
 
             const voucherResult = await client.query(
-                `UPDATE vouchers SET status = 'LOCKED', locked_at = NOW(), updated_at = NOW() 
-                 WHERE id = $1 AND status = 'PENDING' RETURNING *`,
+                `UPDATE vouchers 
+                 SET status = 'LOCKED', locked_at = NOW(), updated_at = NOW() 
+                 WHERE id = $1 AND status = 'PENDING' 
+                 RETURNING *`,
                 [txRef]
             );
 
             if (voucherResult.rowCount > 0) {
                 const v = voucherResult.rows[0];
+
                 await client.query(
-                    `INSERT INTO wallets (user_email, currency, escrow_balance, available_balance, awaiting_settlement, updated_at)
+                    `INSERT INTO wallets 
+                     (user_email, currency, escrow_balance, available_balance, awaiting_settlement, updated_at)
                      VALUES ($1, $2, $3, 0, 0, NOW())
                      ON CONFLICT (user_email, currency) 
-                     DO UPDATE SET escrow_balance = wallets.escrow_balance + EXCLUDED.escrow_balance, updated_at = NOW()`,
+                     DO UPDATE SET 
+                        escrow_balance = wallets.escrow_balance + EXCLUDED.escrow_balance,
+                        updated_at = NOW()`,
                     [v.recipient_email, v.currency.toUpperCase(), Number(v.amount)]
                 );
 
                 await client.query(
-                    `INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id, created_at, updated_at)
+                    `INSERT INTO transactions 
+                     (user_email, voucher_id, transaction_type, amount, currency, status, reference_id, created_at, updated_at)
                      VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, $4, 'SUCCESSFUL', $5, NOW(), NOW())`,
                     [v.recipient_email, v.id, Number(v.amount), v.currency, `FLW-${String(payload.data.id)}`]
                 );
