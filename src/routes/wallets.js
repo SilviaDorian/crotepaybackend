@@ -4,26 +4,31 @@ import { query } from '../db/index.js';
 const router = express.Router();
 
 /**
- * 1. GET BALANCE & STATS (Updated)
+ * 1. GET BALANCE & STATS
+ * Implemented "Lazy Settlement" logic to automatically move 
+ * funds from awaiting_settlement to available_balance.
  */
 router.get('/dashboard/:email', async (req, res) => {
     try {
         const { email } = req.params;
 
-        // 1. ATOMIC SHIFT: Check for any vouchers that crossed the 72h mark
-        // This keeps your UI accurate in real-time
+        // 1. ATOMIC SETTLEMENT: Move ONLY matured funds
+        // Calculation starts from 'locked_at' to satisfy the escrow duration rule.
         await query(`
-            UPDATE public.wallets 
-            SET available_balance = available_balance + awaiting_settlement,
-                awaiting_settlement = 0
-            WHERE user_email = $1 
-            AND awaiting_settlement > 0 
-            AND EXISTS (
-                SELECT 1 FROM public.vouchers 
+            WITH matured_vouchers AS (
+                UPDATE public.vouchers
+                SET status = 'SETTLED'
                 WHERE recipient_email = $1 
-                AND status = 'LOCKED' 
+                AND status = 'RELEASED' 
                 AND (NOW() - locked_at) >= INTERVAL '72 hours'
+                RETURNING amount
             )
+            UPDATE public.wallets
+            SET 
+                available_balance = available_balance + (SELECT COALESCE(SUM(amount), 0) FROM matured_vouchers),
+                awaiting_settlement = awaiting_settlement - (SELECT COALESCE(SUM(amount), 0) FROM matured_vouchers)
+            WHERE user_email = $1 
+            AND (SELECT COUNT(*) FROM matured_vouchers) > 0
         `, [email]);
 
         // 2. Fetch updated Wallet Stats
@@ -32,41 +37,25 @@ router.get('/dashboard/:email', async (req, res) => {
             [email]
         );
         
-        // ... rest of your code remains the same ...
+        // 3. Updated Voucher Aggregates
+        const statsRes = await query(
+            `SELECT 
+                COUNT(*) FILTER (WHERE status = 'LOCKED') as active_escrows,
+                COUNT(*) FILTER (WHERE status = 'RELEASED' OR status = 'SETTLED') as total_completed,
+                COALESCE(SUM(amount) FILTER (WHERE status = 'LOCKED'), 0) as total_locked_value
+             FROM public.vouchers 
+             WHERE recipient_email = $1`,
+            [email]
+        );
 
-/**
- * 1. GET BALANCE & STATS
- */
-// router.get('/dashboard/:email', async (req, res) => {
-//     try {
-//         const { email } = req.params;
-
-//         // 1. Existing Wallet Stats
-//         const walletRes = await query(
-//             "SELECT available_balance, escrow_balance, awaiting_settlement, currency FROM public.wallets WHERE user_email = $1", 
-//             [email]
-//         );
-        
-//         // 2. Updated Voucher Aggregates: Include details about locked vouchers
-//         const statsRes = await query(
-//             `SELECT 
-//                 COUNT(*) FILTER (WHERE status = 'LOCKED') as active_escrows,
-//                 COUNT(*) FILTER (WHERE status = 'RELEASED') as total_completed,
-//                 COALESCE(SUM(usd_equivalent) FILTER (WHERE status = 'LOCKED'), 0) as total_locked_value
-//              FROM public.vouchers 
-//              WHERE creator_email = $1`,
-//             [email]
-//         );
-
-//         // 3. NEW: Get the next upcoming release date
-//         // This helps the user know when their money will be "Available"
-//         const upcomingRelease = await query(
-//             `SELECT id, amount, locked_at + INTERVAL '72 hours' as release_at
-//              FROM public.vouchers 
-//              WHERE creator_email = $1 AND status = 'LOCKED'
-//              ORDER BY release_at ASC LIMIT 1`,
-//             [email]
-//         );
+        // 4. Get the next upcoming release date (based on locked_at + 72 hours)
+        const upcomingRelease = await query(
+            `SELECT (locked_at + INTERVAL '72 hours') as release_at
+             FROM public.vouchers 
+             WHERE recipient_email = $1 AND status = 'RELEASED'
+             ORDER BY release_at ASC LIMIT 1`,
+            [email]
+        );
 
         const stats = statsRes.rows[0];
 
@@ -90,7 +79,6 @@ router.get('/dashboard/:email', async (req, res) => {
  */
 router.get('/history/:email', async (req, res) => {
     try {
-        // FIXED: Changed 'amount_usd' to 'amount' to match your DB schema
         const result = await query(
             `SELECT transaction_type, amount, currency, status, created_at, reference_id
              FROM public.transactions 
@@ -101,7 +89,6 @@ router.get('/history/:email', async (req, res) => {
         res.json(result.rows);
     } catch (err) {
         console.error("History Fetch Error:", err.message);
-        // This is where your previous 'column amount_usd does not exist' error was triggered
         res.status(500).json({ error: "Could not retrieve history." });
     }
 });

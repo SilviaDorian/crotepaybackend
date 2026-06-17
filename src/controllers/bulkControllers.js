@@ -18,8 +18,8 @@ export async function createBulkEscrow(req, res) {
         for (const emp of employees) {
             await client.query(
                 `INSERT INTO public.vouchers 
-                (id, creator_email, recipient_email, recipient_name, amount, currency, status, parent_batch_ref, batch_access_token, master_release_key, recipient_access_token, release_key_hash) 
-                 VALUES ($1,$2,$3,$4,$5,$6,'PENDING',$7,$8,$9,$10,$11)`,
+                (id, creator_email, recipient_email, recipient_name, amount, currency, status, parent_batch_ref, batch_access_token, master_release_key, recipient_access_token, release_key_hash, locked_at) 
+                 VALUES ($1,$2,$3,$4,$5,$6,'LOCKED',$7,$8,$9,$10,$11, NOW())`,
                 [
                     generateVoucherId(),
                     creator_email,
@@ -113,8 +113,9 @@ export async function releaseSingleVoucher(req, res) {
         client = await getClient();
         await client.query('BEGIN');
 
+        // Logic: Check 72 hours from locked_at
         const vResult = await client.query(
-            "SELECT *, (EXTRACT(EPOCH FROM (NOW() - COALESCE(locked_at, created_at))) / 3600) >= 72 as is_over_72 FROM public.vouchers WHERE id = $1 FOR UPDATE",
+            "SELECT *, (EXTRACT(EPOCH FROM (NOW() - locked_at)) / 3600) >= 72 as is_over_72 FROM public.vouchers WHERE id = $1 FOR UPDATE",
             [voucher_id]
         );
 
@@ -169,9 +170,7 @@ export async function disputeSingleVoucher(req, res) {
             "UPDATE public.vouchers SET status = 'DISPUTED', dispute_reason = $1, dispute_story = $2 WHERE id = $3",
             [reason, story, voucher_id]
         );
-
         res.json({ success: true, message: "Individual voucher disputed." });
-
     } catch (err) {
         res.status(500).json({ error: "Dispute failed." });
     }
@@ -180,49 +179,21 @@ export async function disputeSingleVoucher(req, res) {
 // --- 🔥 FIXED: RACE-PROOF BATCH RELEASE ---
 export async function releaseBatch(req, res) {
     const { batchRef, masterReleaseKey } = req.body;
-
     const client = await getClient();
 
     try {
         await client.query('BEGIN');
 
-        /**
-         * 🔒 BATCH LOCK GUARD (prevents double execution)
-         */
-        const lockCheck = await client.query(
-            `
-            SELECT 1
-            FROM public.vouchers
-            WHERE parent_batch_ref = $1
-            AND status = 'RELEASED'
-            LIMIT 1
-            FOR UPDATE
-            `,
-            [batchRef]
-        );
-
-        if (lockCheck.rowCount > 0) {
-            await client.query('COMMIT');
-            return res.status(409).json({
-                success: false,
-                message: "Batch already processed."
-            });
-        }
-
         const vResult = await client.query(
-            "SELECT *, (EXTRACT(EPOCH FROM (NOW() - COALESCE(locked_at, created_at))) / 3600) >= 72 as is_over_72 FROM public.vouchers WHERE parent_batch_ref = $1 FOR UPDATE",
+            "SELECT *, (EXTRACT(EPOCH FROM (NOW() - locked_at)) / 3600) >= 72 as is_over_72 FROM public.vouchers WHERE parent_batch_ref = $1 FOR UPDATE",
             [batchRef]
         );
 
-        if (
-            vResult.rows.length === 0 ||
-            vResult.rows[0].master_release_key !== masterReleaseKey
-        ) {
+        if (vResult.rows.length === 0 || vResult.rows[0].master_release_key !== masterReleaseKey) {
             throw new Error("Invalid batch or key.");
         }
 
         for (const v of vResult.rows) {
-
             if (v.status !== 'LOCKED') continue;
 
             const amount = parseFloat(v.amount);
@@ -252,58 +223,36 @@ export async function releaseBatch(req, res) {
         }
 
         await client.query('COMMIT');
-
         res.json({ success: true, message: "Batch released successfully." });
 
     } catch (e) {
         await client.query('ROLLBACK');
         res.status(400).json({ error: e.message });
-
     } finally {
         client.release();
     }
 }
 
-// --- DISPUTE BATCH ---
 export async function disputeBatch(req, res) {
     const { batchRef, token, reason, story } = req.body;
-
-    if (!batchRef || !token) {
-        return res.status(400).json({ success: false, message: "Missing required fields." });
-    }
+    if (!batchRef || !token) return res.status(400).json({ success: false, message: "Missing required fields." });
 
     try {
         const client = await getClient();
-
         const authCheck = await client.query(
             "SELECT id FROM public.vouchers WHERE parent_batch_ref = $1 AND batch_access_token = $2 LIMIT 1",
             [batchRef, token]
         );
 
-        if (authCheck.rowCount === 0) {
-            return res.status(403).json({
-                success: false,
-                message: "Unauthorized or invalid batch."
-            });
-        }
+        if (authCheck.rowCount === 0) return res.status(403).json({ success: false, message: "Unauthorized." });
 
         await client.query(
-            `UPDATE public.vouchers 
-             SET status = 'DISPUTED', 
-                 dispute_reason = $1, 
-                 dispute_story = $2 
-             WHERE parent_batch_ref = $3`,
+            `UPDATE public.vouchers SET status = 'DISPUTED', dispute_reason = $1, dispute_story = $2 WHERE parent_batch_ref = $3`,
             [reason, story, batchRef]
         );
 
         res.json({ success: true, message: "Entire batch disputed successfully." });
-
     } catch (err) {
-        console.error("CRITICAL BACKEND ERROR in disputeBatch:", err);
-        res.status(500).json({
-            success: false,
-            error: "Batch dispute failed.",
-            details: err.message
-        });
+        res.status(500).json({ success: false, error: "Batch dispute failed." });
     }
 }
