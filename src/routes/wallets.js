@@ -93,29 +93,21 @@ router.get('/history/:email', async (req, res) => {
     }
 });
 
-/**
- * NEW ENDPOINT: /vouchers/settlement-ready/:email
- * Logic: Returns only vouchers that are RELEASED and within the 72h window.
- */
-router.get('/vouchers/settlement-ready/:email', async (req, res) => {
+// Change from /vouchers/settlement-ready/:email
+// TO: /vouchers/settlement-ready (using req.query instead)
+router.get('/vouchers/settlement-ready', async (req, res) => {
     try {
-        const { email } = req.params;
-        
-        // This query specifically targets the "Awaiting Settlement" business rule
-        // We use LOWER() to ensure case-insensitive matching
+        const email = req.query.email;
         const result = await query(
             `SELECT * FROM public.vouchers 
              WHERE LOWER(recipient_email) = LOWER($1)
              AND status = 'RELEASED'
-             AND (NOW() - updated_at) < INTERVAL '72 hours'
-             ORDER BY updated_at ASC`,
+             AND (NOW() - updated_at) < INTERVAL '72 hours'`,
             [email]
         );
-        
         res.json({ vouchers: result.rows });
     } catch (err) {
-        console.error("Settlement Fetch Error:", err);
-        res.status(500).json({ error: "Failed to fetch settlement data." });
+        res.status(500).json({ error: "Failed to fetch." });
     }
 });
 
