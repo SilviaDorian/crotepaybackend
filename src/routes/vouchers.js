@@ -227,6 +227,69 @@ router.post('/:id/settle', async (req, res) => {
     }
 });
 
+// POST /vouchers/:id/manual-settle
+router.post('/:id/manual-settle', async (req, res) => {
+    const { id } = req.params;
+    let client;
+
+    try {
+        client = await getClient();
+        await client.query('BEGIN');
+        await client.query('SET search_path TO public');
+
+        // 1. Fetch voucher and ensure it exists and is released
+        const vResult = await client.query(
+            "SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", 
+            [id]
+        );
+        const v = vResult.rows[0];
+
+        if (!v) throw new Error("Voucher not found.");
+        if (v.status === 'SETTLED') throw new Error("Voucher is already settled.");
+        if (v.status !== 'RELEASED') throw new Error("Voucher must be in RELEASED status.");
+
+        const amount = parseFloat(v.amount);
+
+        // 2. Move funds from 'awaiting_settlement' to 'available_balance' in wallets
+        const updateWallet = await client.query(
+            `UPDATE wallets 
+             SET awaiting_settlement = awaiting_settlement - $1, 
+                 available_balance = available_balance + $1, 
+                 updated_at = NOW() 
+             WHERE user_email = $2 AND currency = $3 
+             AND awaiting_settlement >= $1`,
+            [amount, v.recipient_email, v.currency]
+        );
+
+        if (updateWallet.rowCount === 0) {
+            throw new Error("Insufficient funds in awaiting settlement balance.");
+        }
+
+        // 3. Update Voucher Status
+        await client.query(
+            "UPDATE vouchers SET status = 'SETTLED', updated_at = NOW() WHERE id = $1", 
+            [id]
+        );
+
+        // 4. Log the manual settlement transaction
+        await client.query(
+            `INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) 
+             VALUES ($1, $2, 'MANUAL_SETTLEMENT', $3, $4, 'SUCCESSFUL', $5)`, 
+            [v.recipient_email, v.id, amount, v.currency, `MS-${v.id}`]
+        );
+
+        await client.query('COMMIT');
+        res.json({ success: true, message: "Funds settled to available balance successfully." });
+
+    } catch (err) {
+        if (client) await client.query('ROLLBACK');
+        console.error("Manual Settlement Error:", err.message);
+        res.status(400).json({ error: err.message });
+    } finally {
+        if (client) client.release();
+    }
+});
+
 router.post('/dispute', async (req, res) => {
     const { voucher_id, reason, story } = req.body;
     
