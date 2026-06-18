@@ -93,8 +93,6 @@ router.get('/history/:email', async (req, res) => {
     }
 });
 
-// Change from /vouchers/settlement-ready/:email
-// TO: /vouchers/settlement-ready (using req.query instead)
 router.get('/vouchers/settlement-ready', async (req, res) => {
     try {
         const email = req.query.email;
@@ -102,13 +100,13 @@ router.get('/vouchers/settlement-ready', async (req, res) => {
             `SELECT * FROM public.vouchers 
              WHERE LOWER(recipient_email) = LOWER($1)
              AND status = 'RELEASED'
-             AND (NOW() - updated_at) < INTERVAL '72 hours'`,
+             AND (NOW() - locked_at) < INTERVAL '72 hours'`, // Use locked_at instead of updated_at
             [email]
         );
         res.json({ vouchers: result.rows });
     } catch (err) {
+        console.error("Settlement Query Error:", err);
         res.status(500).json({ error: "Failed to fetch." });
     }
 });
-
 export default router;
