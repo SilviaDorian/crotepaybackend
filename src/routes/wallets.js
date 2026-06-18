@@ -93,35 +93,4 @@ router.get('/history/:email', async (req, res) => {
     }
 });
 
-router.get('/vouchers/settlement-ready', async (req, res) => {
-    const { email } = req.query;
-    console.log(`[DEBUG] Settlement query initiated for: ${email}`);
-    
-    try {
-        // We will break the query into stages so we can see which part fails
-        const result = await query(
-            `SELECT id, status, recipient_email, locked_at, updated_at 
-             FROM public.vouchers 
-             WHERE LOWER(recipient_email) = LOWER($1)`,
-            [email]
-        );
-
-        console.log(`[DEBUG] Found ${result.rows.length} total vouchers for user.`);
-        
-        // Filter in JS to identify why they aren't matching
-        const matured = result.rows.filter(v => {
-            const isReleased = v.status === 'RELEASED';
-            const hasLockedAt = v.locked_at !== null;
-            // You can add console logs here if needed
-            return isReleased && hasLockedAt;
-        });
-
-        console.log(`[DEBUG] After filtering (Released + Has locked_at): ${matured.length} remaining.`);
-
-        res.json({ vouchers: matured });
-    } catch (err) {
-        console.error("[CRITICAL] Settlement Route Error:", err);
-        res.status(500).json({ error: err.message });
-    }
-});
 export default router;
