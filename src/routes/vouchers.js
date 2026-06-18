@@ -200,23 +200,30 @@ router.post('/release', async (req, res) => {
     }
 });
 
-// Inside vouchers.js
-// This will resolve to /vouchers/settlement-ready
-router.get('/settlement-ready', async (req, res) => {
-    console.log("DEBUG: Hit settlement-ready endpoint"); // Add this!
-    const { email } = req.query;
+// POST /vouchers/:id/settle
+router.post('/:id/settle', async (req, res) => {
+    const { id } = req.params;
+
     try {
+        // Assuming 'query' is your database pool/client execution function
         const result = await query(
-            `SELECT * FROM public.vouchers 
-             WHERE LOWER(recipient_email) = LOWER($1)
-             AND status = 'RELEASED'
-             AND (NOW() - locked_at) < INTERVAL '72 hours'`,
-            [email]
+            "UPDATE vouchers SET status = 'SETTLED', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'RELEASED' RETURNING *",
+            [id]
         );
-        res.json({ vouchers: result.rows });
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ 
+                error: "Voucher not found or not in a state to be settled" 
+            });
+        }
+
+        res.json({ 
+            message: "Voucher marked as SETTLED", 
+            voucher: result.rows[0] 
+        });
     } catch (err) {
         console.error("Settlement Error:", err);
-        res.status(500).json({ error: "Failed" });
+        res.status(500).json({ error: "Database update failed" });
     }
 });
 
