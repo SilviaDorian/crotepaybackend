@@ -1,6 +1,7 @@
 import express from 'express';
 import crypto from 'crypto';
 import { query, getClient } from '../db/index.js';
+import { sendNotification } from '../services/notificationService.js'; // Ensure path is correct
 
 const router = express.Router();
 
@@ -191,6 +192,15 @@ router.post('/release', async (req, res) => {
 
         await client.query('COMMIT');
         res.json({ success: true, message: `Funds moved from escrow to ${targetColumn}.` });
+
+        // --- TRIGGER RELEASE NOTIFICATION HERE ---
+        // We notify the creator since they are the one receiving the released funds
+        sendNotification('VOUCHER_RELEASED', v.creator_email, {
+            voucher_ref: v.id,
+            amount: amount,
+            currency: v.currency
+        }).catch(err => console.error("❌ Failed to send VOUCHER_RELEASED email:", err));
+        
     } catch (e) {
         if (client) await client.query('ROLLBACK');
         console.error("Release Error:", e.message);

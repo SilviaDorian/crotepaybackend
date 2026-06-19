@@ -1,4 +1,5 @@
 import { getClient } from '../db/index.js';
+import { sendNotification } from '../services/notificationService.js'; // Ensure path is correct
 import { generateVoucherId, generateToken, generateKey, generateBatchRef } from '../utils/idGenerator.js';
 
 // --- BATCH CREATION ---
@@ -152,6 +153,12 @@ export async function releaseSingleVoucher(req, res) {
         );
 
         await client.query('COMMIT');
+        sendNotification('VOUCHER_RELEASED', v.recipient_email, {
+    voucher_ref: v.id,
+    amount: amount,
+    currency: v.currency
+}).catch(err => console.error("❌ Failed to send release email:", err));
+
         res.json({ success: true, message: "Voucher released successfully." });
 
     } catch (e) {
@@ -223,6 +230,14 @@ export async function releaseBatch(req, res) {
         }
 
         await client.query('COMMIT');
+
+        // --- TRIGGER NOTIFICATION HERE ---
+sendNotification('VOUCHER_RELEASED', v.recipient_email, {
+    voucher_ref: v.id,
+    amount: amount,
+    currency: v.currency
+}).catch(err => console.error(`❌ Failed to send release email for ${v.id}:`, err));
+
         res.json({ success: true, message: "Batch released successfully." });
 
     } catch (e) {
