@@ -56,7 +56,7 @@ router.post('/flutterwave', async (req, res) => {
             
             const voucherResult = await client.query(
                 `UPDATE vouchers SET status = 'LOCKED', locked_at = NOW(), updated_at = NOW() 
-                 WHERE id = $1 AND status = 'PENDING' RETURNING *`,
+                 WHERE id = split_part($1, '_', 1) AND status = 'PENDING' RETURNING *`,
                 [ref]
             );
 
