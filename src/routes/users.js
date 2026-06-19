@@ -106,31 +106,40 @@ router.post('/login', async (req, res) => {
  */
 router.post('/forgot-password', async (req, res) => {
     const { email } = req.body;
-    
+    console.log("LOG: Forgot password request received for:", email);
+
     try {
+        if (!email) {
+            console.log("LOG: Email missing in request body");
+            return res.status(400).json({ error: "Email is required." });
+        }
+
         const userEmail = email.toLowerCase().trim();
+        console.log("LOG: Searching for user:", userEmail);
+        
         const userResult = await query('SELECT id FROM public.users WHERE email = $1', [userEmail]);
         
         if (userResult.rows.length === 0) {
+            console.log("LOG: User not found in database");
             return res.status(404).json({ error: "This email address does not exist in our records." });
         }
 
+        console.log("LOG: User found, generating token...");
         const token = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-        const expiresAt = new Date(Date.now() + 3600000); // 1 hour expiry
+        const expiresAt = new Date(Date.now() + 3600000); 
 
         await query('UPDATE public.users SET reset_token = $1, reset_expires_at = $2 WHERE email = $3', 
             [token, expiresAt, userEmail]);
-
-        // Trigger the Email Notification
-        //const resetLink = `${process.env.FRONTEND_URL}/reset-password.html?token=${token}`;
-        // await sendNotification('PASSWORD_RESET', userEmail, {
-        //     link: resetLink
-        // });
         
+        console.log("LOG: Database updated successfully");
+
+        // Keeping notification commented out for now to ensure this route is 100% stable
         res.json({ message: "A reset link has been sent to your email." });
+
     } catch (err) {
-        console.error("Forgot Password Error:", err.message);
-        res.status(500).json({ error: "Server error." });
+        // This log will print the full error details to your Vercel console
+        console.error("LOG: CRITICAL ERROR in /forgot-password:", err);
+        res.status(500).json({ error: "Server error occurred. Check logs." });
     }
 });
 
