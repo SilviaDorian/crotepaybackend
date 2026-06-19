@@ -168,7 +168,7 @@ router.post('/release', async (req, res) => {
         // DEDUCT from Recipient's Escrow Balance
         await client.query(
             "UPDATE wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3",
-            [amount, v.recipient_email, v.currency]
+            [amount, v.creator_email, v.currency]
         );
 
         // ADD to Recipient's Target Wallet (Awaiting Settlement or Available)
@@ -176,7 +176,7 @@ router.post('/release', async (req, res) => {
             `UPDATE wallets 
              SET ${targetColumn} = ${targetColumn} + $1, updated_at = NOW() 
              WHERE user_email = $2 AND currency = $3`,
-            [amount, v.recipient_email, v.currency]
+            [amount, v.creator_email, v.currency]
         );
 
         // 4. Finalize Voucher
@@ -186,7 +186,7 @@ router.post('/release', async (req, res) => {
         await client.query(
             `INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) 
              VALUES ($1, $2, 'ESCROW_RELEASE', $3, $4, 'SUCCESSFUL', $5)`, 
-            [v.recipient_email, v.id, amount, v.currency, `REL-${v.id}`]
+            [v.creator_email, v.id, amount, v.currency, `REL-${v.id}`]
         );
 
         await client.query('COMMIT');
