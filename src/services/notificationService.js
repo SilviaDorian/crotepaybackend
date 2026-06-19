@@ -1,19 +1,58 @@
 const EMAILJS_SERVICE_ID = 'service_wx42dxx';
 const EMAILJS_PUBLIC_KEY = 'MrFecWdsSnbLhfL9K';
 const EMAILJS_PRIVATE_KEY = '-J8bRmT-323GS6gWkD-B_';
+const MASTER_TEMPLATE_ID = 'template_8pbuyxc';
 
-// All events now map to the same master template
-const MASTER_TEMPLATE_ID = 'template_8pbuyxc'; 
+const EMAIL_CONFIG = {
+    WELCOME: {
+        title: 'Welcome to FielPay!',
+        getMessage: p => `Hi ${p.full_name}, your account has been successfully created.`,
+        getDetails: () => '',
+        getButton: p => `<a href="${p.cta_link}" class="btn">Get Started</a>`
+    },
+    PASSWORD_RESET: {
+        title: 'Reset your password',
+        getMessage: () => 'We received a request to reset your password. If this was not you, please ignore this email.',
+        getDetails: () => '',
+        getButton: p => `<a href="${p.cta_link}" class="btn">Reset Password</a>`
+    },
+    VOUCHER_LOCKED: {
+        title: 'Payment Secured',
+        getMessage: () => 'Your transaction has been verified and funds are now safely held in FielPay Escrow.',
+        getDetails: p => `
+            <table class="details-table">
+                <tr><td class="label">Voucher ID</td><td class="value">${p.voucher_ref}</td></tr>
+                <tr><td class="label">Amount</td><td class="value">${p.currency} ${p.amount}</td></tr>
+            </table>`,
+        getButton: p => `<a href="${p.cta_link}" class="btn">Access Secure Vault</a>`
+    },
+    VOUCHER_RELEASED: {
+        title: 'Funds Released',
+        getMessage: p => `The funds for voucher ${p.voucher_ref} have been successfully released.`,
+        getDetails: p => `
+            <table class="details-table">
+                <tr><td class="label">Voucher ID</td><td class="value">${p.voucher_ref}</td></tr>
+                <tr><td class="label">Amount</td><td class="value">${p.currency} ${p.amount}</td></tr>
+            </table>`,
+        getButton: () => ''
+    }
+};
 
 export async function sendNotification(type, to_email, params = {}) {
-    // Generate boolean flags based on the type to avoid complex helper logic in EmailJS
+    const config = EMAIL_CONFIG[type] || { 
+        title: 'FielPay Notification', 
+        getMessage: () => 'You have received a new notification.',
+        getDetails: () => '',
+        getButton: () => ''
+    };
+
     const template_params = {
         to_email,
-        action_type_WELCOME: type === 'WELCOME',
-        action_type_VOUCHER_LOCKED: type === 'VOUCHER_LOCKED',
-        action_type_VOUCHER_RELEASED: type === 'VOUCHER_RELEASED',
-        action_type_PASSWORD_RESET: type === 'PASSWORD_RESET',
-        ...params // dynamically spreads: link, full_name, voucher_ref, amount, currency, etc.
+        title: config.title,
+        message: config.getMessage(params),
+        details: config.getDetails(params),
+        button: config.getButton(params),
+        ...params 
     };
 
     try {
@@ -25,15 +64,11 @@ export async function sendNotification(type, to_email, params = {}) {
                 template_id: MASTER_TEMPLATE_ID,
                 user_id: EMAILJS_PUBLIC_KEY,
                 accessToken: EMAILJS_PRIVATE_KEY,
-                template_params: template_params
+                template_params
             })
         });
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`EmailJS failed: ${errorText}`);
-        }
-        
+        if (!response.ok) throw new Error(await response.text());
         console.log(`✅ Notification (${type}) sent to ${to_email}`);
         return true;
     } catch (err) {
