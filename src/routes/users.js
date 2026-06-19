@@ -104,15 +104,6 @@ router.post('/login', async (req, res) => {
 /**
  * 8. FORGOT PASSWORD: Generate Token
  */
-/**
- * 8. FORGOT PASSWORD: Generate Token
- */
-/**
- * 8. FORGOT PASSWORD: Generate Token
- */
-/**
- * 8. FORGOT PASSWORD: Generate Token
- */
 router.post('/forgot-password', async (req, res) => {
     const { email } = req.body;
     
@@ -132,9 +123,9 @@ router.post('/forgot-password', async (req, res) => {
 
         // Trigger the Email Notification
         const resetLink = `${process.env.FRONTEND_URL}/reset-password.html?token=${token}`;
-        await sendNotification('PASSWORD_RESET', userEmail, {
-            link: resetLink
-        });
+        // await sendNotification('PASSWORD_RESET', userEmail, {
+        //     link: resetLink
+        // });
         
         res.json({ message: "A reset link has been sent to your email." });
     } catch (err) {
