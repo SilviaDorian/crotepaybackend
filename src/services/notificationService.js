@@ -2,34 +2,22 @@ const EMAILJS_SERVICE_ID = 'service_wx42dxx';
 const EMAILJS_PUBLIC_KEY = 'MrFecWdsSnbLhfL9K';
 const EMAILJS_PRIVATE_KEY = '-J8bRmT-323GS6gWkD-B_';
 
-// Mapping types to specific EmailJS Template IDs
-const TEMPLATE_MAP = {
-    REGISTRATION: 'template_reg',
-    VOUCHER_CREATED: 'template_voucher_new',
-    FUNDS_MOVED: 'template_funds_moved',
-    WITHDRAWAL: 'template_withdrawal',
-    CONVERSION: 'template_conversion'
-};
+// All events now map to the same master template
+const MASTER_TEMPLATE_ID = 'template_master'; 
 
 export async function sendNotification(type, to_email, params = {}) {
-    const template_id = TEMPLATE_MAP[type];
-    
-    if (!template_id) {
-        console.error(`❌ Notification type ${type} not supported.`);
-        return false;
-    }
-
     try {
         const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 service_id: EMAILJS_SERVICE_ID,
-                template_id: template_id,
+                template_id: MASTER_TEMPLATE_ID,
                 user_id: EMAILJS_PUBLIC_KEY,
                 accessToken: EMAILJS_PRIVATE_KEY,
                 template_params: {
                     to_email,
+                    action_type: type, // This tells the template what to render
                     ...params
                 }
             })

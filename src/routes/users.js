@@ -2,6 +2,7 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { query, getClient } from '../db/index.js';
+import { sendNotification } from '../services/notificationService.js'; // Ensure path is correct
 
 const router = express.Router();
 
@@ -116,29 +117,29 @@ router.post('/forgot-password', async (req, res) => {
     const { email } = req.body;
     
     try {
-        if (!email) return res.status(400).json({ error: "Email is required." });
         const userEmail = email.toLowerCase().trim();
-
-        const userResult = await query('SELECT email FROM public.users WHERE email = $1', [userEmail]);
+        const userResult = await query('SELECT id FROM public.users WHERE email = $1', [userEmail]);
         
         if (userResult.rows.length === 0) {
             return res.status(404).json({ error: "This email address does not exist in our records." });
         }
 
-        // Generate a random token without using 'crypto'
         const token = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-        const expiresAt = new Date(Date.now() + 3600000); 
+        const expiresAt = new Date(Date.now() + 3600000); // 1 hour expiry
 
-        await query(
-            'UPDATE public.users SET reset_token = $1, reset_expires_at = $2 WHERE email = $3', 
-            [token, expiresAt, userEmail]
-        );
+        await query('UPDATE public.users SET reset_token = $1, reset_expires_at = $2 WHERE email = $3', 
+            [token, expiresAt, userEmail]);
 
+        // Trigger the Email Notification
+        const resetLink = `${process.env.FRONTEND_URL}/reset-password.html?token=${token}`;
+        await sendNotification('PASSWORD_RESET', userEmail, {
+            link: resetLink
+        });
+        
         res.json({ message: "A reset link has been sent to your email." });
     } catch (err) {
-        console.error("FORGOT PASSWORD ERROR:", err);
-        // This will now send the specific error back to your frontend so you can see it in the alert()
-        res.status(500).json({ error: "Server Error: " + err.message });
+        console.error("Forgot Password Error:", err.message);
+        res.status(500).json({ error: "Server error." });
     }
 });
 
