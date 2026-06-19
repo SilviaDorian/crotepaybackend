@@ -78,7 +78,16 @@ router.post('/flutterwave', async (req, res) => {
                      VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, $4, 'SUCCESSFUL', $5, NOW(), NOW())`,
                     [v.creator_email, v.id, Number(v.amount), v.currency, `FLW-${String(payload.data.id)}`]
                 );
-                
+
+                // Ensure you are passing the correct keys expected by your EMAIL_CONFIG
+        sendNotification('VOUCHER_LOCKED', v.creator_email, {
+            full_name: v.creator_name || 'User',
+            voucher_ref: v.id,
+            amount: v.amount,
+            currency: v.currency,
+            cta_link: "https://fielpay.free.nf/login.html" 
+        }).catch(err => console.error("❌ Failed to send VOUCHER_LOCKED email:", err));
+
                 console.log(`✅ Single voucher processed: ${ref}`);
             } else {
                 console.log(`⚠️ Single voucher lock failed: No 'PENDING' voucher found with ID ${ref}`);
