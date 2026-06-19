@@ -117,7 +117,8 @@ router.post('/forgot-password', async (req, res) => {
         const userEmail = email.toLowerCase().trim();
         console.log("LOG: Searching for user:", userEmail);
         
-        const userResult = await query('SELECT id FROM public.users WHERE email = $1', [userEmail]);
+        // FIX: Changed 'SELECT id' to 'SELECT email' because 'id' column does not exist
+        const userResult = await query('SELECT email FROM public.users WHERE email = $1', [userEmail]);
         
         if (userResult.rows.length === 0) {
             console.log("LOG: User not found in database");
@@ -133,11 +134,10 @@ router.post('/forgot-password', async (req, res) => {
         
         console.log("LOG: Database updated successfully");
 
-        // Keeping notification commented out for now to ensure this route is 100% stable
+        // Once confirmed working, you can uncomment the notification service here
         res.json({ message: "A reset link has been sent to your email." });
 
     } catch (err) {
-        // This log will print the full error details to your Vercel console
         console.error("LOG: CRITICAL ERROR in /forgot-password:", err);
         res.status(500).json({ error: "Server error occurred. Check logs." });
     }
@@ -150,8 +150,9 @@ router.post('/reset-password', async (req, res) => {
     const { token, newPassword } = req.body;
     
     try {
+        // FIX: Select the email instead of id
         const userResult = await query(
-            'SELECT id FROM public.users WHERE reset_token = $1 AND reset_expires_at > NOW()', 
+            'SELECT email FROM public.users WHERE reset_token = $1 AND reset_expires_at > NOW()', 
             [token]
         );
         
@@ -159,15 +160,18 @@ router.post('/reset-password', async (req, res) => {
             return res.status(400).json({ error: "Invalid or expired token." });
         }
 
+        const userEmail = userResult.rows[0].email;
         const hashedPassword = await bcrypt.hash(newPassword, 10);
         
+        // FIX: Update using email instead of id
         await query(
-            'UPDATE public.users SET password_hash = $1, reset_token = NULL, reset_expires_at = NULL WHERE id = $2', 
-            [hashedPassword, userResult.rows[0].id]
+            'UPDATE public.users SET password_hash = $1, reset_token = NULL, reset_expires_at = NULL WHERE email = $2', 
+            [hashedPassword, userEmail]
         );
         
         res.json({ success: true, message: "Password reset successful." });
     } catch (err) {
+        console.error("Reset Password Error:", err.message);
         res.status(500).json({ error: "Reset failed." });
     }
 });
