@@ -106,6 +106,9 @@ router.post('/login', async (req, res) => {
 /**
  * 8. FORGOT PASSWORD: Generate Token
  */
+/**
+ * 8. FORGOT PASSWORD: Generate Token
+ */
 router.post('/forgot-password', async (req, res) => {
     const { email } = req.body;
     
@@ -118,19 +121,22 @@ router.post('/forgot-password', async (req, res) => {
             return res.status(404).json({ error: "This email address does not exist in our records." });
         }
 
-        const token = crypto.randomBytes(32).toString('hex');
+        // Generate a random token (consistent with your existing random logic)
+        const token = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
         const expiresAt = new Date(Date.now() + 3600000); // 1 hour expiry
 
         await query('UPDATE public.users SET reset_token = $1, reset_expires_at = $2 WHERE email = $3', 
             [token, expiresAt, userEmail]);
 
-        // await sendEmail(userEmail, "Reset your password", `...`);
-        
+        // Email service will be integrated here later
         res.json({ message: "A reset link has been sent to your email." });
     } catch (err) {
+        console.error("Forgot Password Error:", err.message);
         res.status(500).json({ error: "Server error." });
     }
-});/**
+});
+
+/**
  * 9. RESET PASSWORD: Validate Token & Update
  */
 router.post('/reset-password', async (req, res) => {
