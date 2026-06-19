@@ -8,7 +8,7 @@ const EMAIL_CONFIG = {
         title: 'Welcome to FielPay!',
         getMessage: p => `Hi ${p.full_name}, your account has been successfully created.`,
         getDetails: () => '',
-        getButton: p => `<a href="${p.cta_link || '#'}" class="btn">Get Started</a>`
+        getButton: p => `<a href="${p.cta_link || 'https://fielpay.free.nf/login.html'}" class="btn">Login to FielPay</a>`
     },
     PASSWORD_RESET: {
         title: 'Reset your password',
@@ -24,7 +24,7 @@ const EMAIL_CONFIG = {
                 <tr><td style="color:#717E84; font-weight:600; padding:10px 0;">Voucher ID</td><td style="font-weight:800; text-align:right;">${p.voucher_ref || 'N/A'}</td></tr>
                 <tr><td style="color:#717E84; font-weight:600; padding:10px 0;">Amount</td><td style="font-weight:800; text-align:right;">${p.currency || ''} ${p.amount || '0'}</td></tr>
             </table>`,
-        getButton: p => `<a href="${p.cta_link || '#'}" class="btn">Access Secure Vault</a>`
+            getButton: p => `<a href="${p.cta_link || 'https://fielpay.free.nf/login.html'}" class="btn">Login to FielPay</a>`
     },
     VOUCHER_RELEASED: {
         title: 'Funds Released',
@@ -34,7 +34,7 @@ const EMAIL_CONFIG = {
                 <tr><td style="color:#717E84; font-weight:600; padding:10px 0;">Voucher ID</td><td style="font-weight:800; text-align:right;">${p.voucher_ref || 'N/A'}</td></tr>
                 <tr><td style="color:#717E84; font-weight:600; padding:10px 0;">Amount</td><td style="font-weight:800; text-align:right;">${p.currency || ''} ${p.amount || '0'}</td></tr>
             </table>`,
-        getButton: () => ''
+        getButton: p => `<a href="${p.cta_link || 'https://fielpay.free.nf/login.html'}" class="btn">Login to FielPay</a>`
     }
 };
 

@@ -46,6 +46,15 @@ router.post('/register', async (req, res) => {
         );
 
         await client.query('COMMIT');
+
+        // --- NEW: Send Welcome Notification ---
+        // We do this after the commit to ensure the user is saved successfully.
+        // We wrap it in a try/catch or ignore failures so the user 
+        // still sees "Account created!" even if the email service is down.
+        sendNotification('WELCOME', userEmail, {
+            full_name: full_name,
+            cta_link: "https://fielpay.free.nf/login.html"
+        }).catch(err => console.error("Welcome email failed to send:", err));
         res.status(201).json({ success: true, message: "Account created!" });
 
     } catch (err) {
