@@ -122,7 +122,7 @@ router.post('/forgot-password', async (req, res) => {
             [token, expiresAt, userEmail]);
 
         // Trigger the Email Notification
-        const resetLink = `${process.env.FRONTEND_URL}/reset-password.html?token=${token}`;
+        //const resetLink = `${process.env.FRONTEND_URL}/reset-password.html?token=${token}`;
         // await sendNotification('PASSWORD_RESET', userEmail, {
         //     link: resetLink
         // });
