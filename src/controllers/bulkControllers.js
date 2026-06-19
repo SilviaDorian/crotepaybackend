@@ -153,12 +153,18 @@ export async function releaseSingleVoucher(req, res) {
         );
 
         await client.query('COMMIT');
-        sendNotification('VOUCHER_RELEASED', v.recipient_email, {
-    voucher_ref: v.id,
-    amount: amount,
-    currency: v.currency
-}).catch(err => console.error("❌ Failed to send release email:", err));
 
+      // --- TRIGGER RELEASE NOTIFICATION HERE ---
+try {
+    await sendNotification('VOUCHER_RELEASED', v.recipient_email, {
+        voucher_ref: v.id,
+        amount: amount,
+        currency: v.currency
+    });
+    console.log(`✅ VOUCHER_RELEASED notification sent to ${v.recipient_email}`);
+} catch (err) {
+    console.error(`❌ Failed to send VOUCHER_RELEASED email to ${v.recipient_email}:`, err);
+}
         res.json({ success: true, message: "Voucher released successfully." });
 
     } catch (e) {
@@ -231,13 +237,19 @@ export async function releaseBatch(req, res) {
 
         await client.query('COMMIT');
 
-        // --- TRIGGER NOTIFICATION HERE ---
-sendNotification('VOUCHER_RELEASED', v.recipient_email, {
-    voucher_ref: v.id,
-    amount: amount,
-    currency: v.currency
-}).catch(err => console.error(`❌ Failed to send release email for ${v.id}:`, err));
+        // --- TRIGGER RELEASE NOTIFICATION HERE ---
+try {
+    await sendNotification('VOUCHER_RELEASED', v.recipient_email, {
+        voucher_ref: v.id,
+        amount: amount,
+        currency: v.currency
+    });
+    console.log(`✅ VOUCHER_RELEASED notification sent to ${v.recipient_email}`);
+} catch (err) {
+    console.error(`❌ Failed to send release email for ${v.id}:`, err);
+}
 
+  
         res.json({ success: true, message: "Batch released successfully." });
 
     } catch (e) {

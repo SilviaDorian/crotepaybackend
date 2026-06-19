@@ -66,16 +66,20 @@ export async function processBulkEscrowFunding(batchRef = null) {
                 fundedCount++;
                 console.log(`✅ FUNDED → ${voucher.recipient_email} | ${voucher.amount} ${voucher.currency} (${voucher.id})`);
 
-                // --- TRIGGER NOTIFICATION HERE ---
-        // We use recipient_email and the voucher details available in the loop
-        sendNotification('VOUCHER_LOCKED', voucher.recipient_email, {
-            full_name: voucher.recipient_name || 'User', // Ensure your DB select gets this
-            voucher_ref: voucher.id,
-            amount: voucher.amount,
-            currency: voucher.currency,
-            cta_link: "https://fielpay.free.nf/login.html"
-        }).catch(err => console.error(`❌ Failed to send bulk lock email to ${voucher.recipient_email}:`, err));
-        
+        // --- TRIGGER NOTIFICATION HERE ---
+try {
+    await sendNotification('VOUCHER_LOCKED', voucher.recipient_email, {
+        full_name: voucher.recipient_name || 'User',
+        voucher_ref: voucher.id,
+        amount: voucher.amount,
+        currency: voucher.currency,
+        cta_link: "https://fielpay.free.nf/login.html"
+    });
+    console.log(`✅ Email sent successfully to: ${voucher.recipient_email}`);
+} catch (err) {
+    console.error(`❌ Failed to send VOUCHER_LOCKED email to ${voucher.recipient_email}:`, err);
+    // Note: We do not re-throw here so the loop can continue to the next recipient
+}
             } catch (e) {
                 console.error(`❌ Failed voucher ${voucher.id}:`, e.message);
             }
