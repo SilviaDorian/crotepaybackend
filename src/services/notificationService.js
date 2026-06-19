@@ -3,7 +3,7 @@ const EMAILJS_PUBLIC_KEY = 'MrFecWdsSnbLhfL9K';
 const EMAILJS_PRIVATE_KEY = '-J8bRmT-323GS6gWkD-B_';
 
 // All events now map to the same master template
-const MASTER_TEMPLATE_ID = 'template_master'; 
+const MASTER_TEMPLATE_ID = 'template_8pbuyxc'; 
 
 export async function sendNotification(type, to_email, params = {}) {
     try {
