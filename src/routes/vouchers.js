@@ -164,14 +164,14 @@ router.post('/release', async (req, res) => {
         const diffInHours = (new Date() - escrowStartTime) / (1000 * 60 * 60);
         const targetColumn = diffInHours >= 72 ? 'available_balance' : 'awaiting_settlement';
 
-        // 3. Move funds from Recipient's Escrow to their Wallet
+        // 3. Move funds from Creator's Escrow to their Wallet
         // DEDUCT from Recipient's Escrow Balance
         await client.query(
             "UPDATE wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3",
             [amount, v.creator_email, v.currency]
         );
 
-        // ADD to Recipient's Target Wallet (Awaiting Settlement or Available)
+        // ADD to Creator's Target Wallet (Awaiting Settlement or Available)
         await client.query(
             `UPDATE wallets 
              SET ${targetColumn} = ${targetColumn} + $1, updated_at = NOW() 
@@ -203,27 +203,58 @@ router.post('/release', async (req, res) => {
 // POST /vouchers/:id/settle
 router.post('/:id/settle', async (req, res) => {
     const { id } = req.params;
+    let client;
 
     try {
-        // Assuming 'query' is your database pool/client execution function
-        const result = await query(
-            "UPDATE vouchers SET status = 'SETTLED', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'RELEASED' RETURNING *",
+        client = await getClient();
+        await client.query('BEGIN');
+        await client.query('SET search_path TO public');
+
+        // 1. Lock the voucher for update
+        const result = await client.query(
+            "UPDATE vouchers SET status = 'SETTLED', updated_at = NOW() WHERE id = $1 AND status = 'RELEASED' RETURNING *",
             [id]
         );
 
         if (result.rowCount === 0) {
-            return res.status(404).json({ 
-                error: "Voucher not found or not in a state to be settled" 
-            });
+            throw new Error("Voucher not found or not in 'RELEASED' status.");
         }
 
-        res.json({ 
-            message: "Voucher marked as SETTLED", 
-            voucher: result.rows[0] 
-        });
+        const v = result.rows[0];
+        const amount = parseFloat(v.amount);
+        const targetEmail = v.parent_batch_ref ? v.recipient_email : v.creator_email;
+
+        // 2. Move funds from 'awaiting_settlement' to 'available_balance'
+        const updateWallet = await client.query(
+            `UPDATE wallets 
+             SET awaiting_settlement = awaiting_settlement - $1, 
+                 available_balance = available_balance + $1, 
+                 updated_at = NOW() 
+             WHERE user_email = $2 AND currency = $3 
+             AND awaiting_settlement >= $1`,
+            [amount, targetEmail, v.currency]
+        );
+
+        if (updateWallet.rowCount === 0) {
+            throw new Error("Insufficient funds in awaiting settlement.");
+        }
+
+        // 3. Log the transaction
+        await client.query(
+            `INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) 
+             VALUES ($1, $2, 'AUTO_SETTLEMENT', $3, $4, 'SUCCESSFUL', $5)`, 
+            [targetEmail, v.id, amount, v.currency, `AS-${v.id}`]
+        );
+
+        await client.query('COMMIT');
+        res.json({ message: "Voucher settled successfully.", voucher: v });
+
     } catch (err) {
-        console.error("Settlement Error:", err);
-        res.status(500).json({ error: "Database update failed" });
+        if (client) await client.query('ROLLBACK');
+        console.error("Auto-Settlement Error:", err.message);
+        res.status(400).json({ error: err.message });
+    } finally {
+        if (client) client.release();
     }
 });
 
@@ -237,11 +268,8 @@ router.post('/:id/manual-settle', async (req, res) => {
         await client.query('BEGIN');
         await client.query('SET search_path TO public');
 
-        // 1. Fetch voucher and ensure it exists and is released
-        const vResult = await client.query(
-            "SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", 
-            [id]
-        );
+        // 1. Fetch voucher
+        const vResult = await client.query("SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", [id]);
         const v = vResult.rows[0];
 
         if (!v) throw new Error("Voucher not found.");
@@ -250,7 +278,12 @@ router.post('/:id/manual-settle', async (req, res) => {
 
         const amount = parseFloat(v.amount);
 
-        // 2. Move funds from 'awaiting_settlement' to 'available_balance' in wallets
+        // 2. Determine target email based on voucher type
+        // If parent_batch_ref is present, it's a Bulk voucher (use recipient_email)
+        // Otherwise, it's a Single voucher (use creator_email)
+        const targetEmail = v.parent_batch_ref ? v.recipient_email : v.creator_email;
+
+        // 3. Move funds from 'awaiting_settlement' to 'available_balance'
         const updateWallet = await client.query(
             `UPDATE wallets 
              SET awaiting_settlement = awaiting_settlement - $1, 
@@ -258,28 +291,25 @@ router.post('/:id/manual-settle', async (req, res) => {
                  updated_at = NOW() 
              WHERE user_email = $2 AND currency = $3 
              AND awaiting_settlement >= $1`,
-            [amount, v.recipient_email, v.currency]
+            [amount, targetEmail, v.currency]
         );
 
         if (updateWallet.rowCount === 0) {
-            throw new Error("Insufficient funds in awaiting settlement balance.");
+            throw new Error(`Insufficient funds in awaiting settlement for ${targetEmail}.`);
         }
 
-        // 3. Update Voucher Status
-        await client.query(
-            "UPDATE vouchers SET status = 'SETTLED', updated_at = NOW() WHERE id = $1", 
-            [id]
-        );
+        // 4. Update Voucher Status
+        await client.query("UPDATE vouchers SET status = 'SETTLED', updated_at = NOW() WHERE id = $1", [id]);
 
-        // 4. Log the manual settlement transaction
+        // 5. Log transaction
         await client.query(
             `INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id) 
              VALUES ($1, $2, 'MANUAL_SETTLEMENT', $3, $4, 'SUCCESSFUL', $5)`, 
-            [v.recipient_email, v.id, amount, v.currency, `MS-${v.id}`]
+            [targetEmail, v.id, amount, v.currency, `MS-${v.id}`]
         );
 
         await client.query('COMMIT');
-        res.json({ success: true, message: "Funds settled to available balance successfully." });
+        res.json({ success: true, message: `Funds settled for ${targetEmail} successfully.` });
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
