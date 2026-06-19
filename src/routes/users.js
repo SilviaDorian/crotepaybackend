@@ -138,7 +138,7 @@ router.post('/forgot-password', async (req, res) => {
         
         // Trigger the Notification Service
         const emailSent = await sendNotification('PASSWORD_RESET', userEmail, {
-            link: resetLink
+            cta_link: resetLink
         });
 
         if (!emailSent) {
