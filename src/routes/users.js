@@ -103,15 +103,20 @@ router.post('/login', async (req, res) => {
 /**
  * 8. FORGOT PASSWORD: Generate Token
  */
+/**
+ * 8. FORGOT PASSWORD: Generate Token
+ */
 router.post('/forgot-password', async (req, res) => {
     const { email } = req.body;
-    const genericResponse = { message: "If that email is registered, a reset link has been sent." };
     
     try {
         const userEmail = email.toLowerCase().trim();
         const userResult = await query('SELECT id FROM public.users WHERE email = $1', [userEmail]);
         
-        if (userResult.rows.length === 0) return res.json(genericResponse);
+        // Return 404 if email does not exist
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ error: "This email address does not exist in our records." });
+        }
 
         const token = crypto.randomBytes(32).toString('hex');
         const expiresAt = new Date(Date.now() + 3600000); // 1 hour expiry
@@ -119,16 +124,13 @@ router.post('/forgot-password', async (req, res) => {
         await query('UPDATE public.users SET reset_token = $1, reset_expires_at = $2 WHERE email = $3', 
             [token, expiresAt, userEmail]);
 
-        // Integrate your mailing service here
-        // await sendEmail(userEmail, "Reset your password", `Your link: ${process.env.FRONTEND_URL}/reset-password?token=${token}`);
+        // await sendEmail(userEmail, "Reset your password", `...`);
         
-        res.json(genericResponse);
+        res.json({ message: "A reset link has been sent to your email." });
     } catch (err) {
         res.status(500).json({ error: "Server error." });
     }
-});
-
-/**
+});/**
  * 9. RESET PASSWORD: Validate Token & Update
  */
 router.post('/reset-password', async (req, res) => {
