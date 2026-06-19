@@ -117,7 +117,6 @@ router.post('/forgot-password', async (req, res) => {
         const userEmail = email.toLowerCase().trim();
         console.log("LOG: Searching for user:", userEmail);
         
-        // FIX: Changed 'SELECT id' to 'SELECT email' because 'id' column does not exist
         const userResult = await query('SELECT email FROM public.users WHERE email = $1', [userEmail]);
         
         if (userResult.rows.length === 0) {
@@ -127,14 +126,27 @@ router.post('/forgot-password', async (req, res) => {
 
         console.log("LOG: User found, generating token...");
         const token = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-        const expiresAt = new Date(Date.now() + 3600000); 
+        const expiresAt = new Date(Date.now() + 3600000); // 1 hour expiry
 
         await query('UPDATE public.users SET reset_token = $1, reset_expires_at = $2 WHERE email = $3', 
             [token, expiresAt, userEmail]);
         
         console.log("LOG: Database updated successfully");
 
-        // Once confirmed working, you can uncomment the notification service here
+        // Construct the reset link using your environment variable
+        const resetLink = `${process.env.FRONTEND_URL}/reset-password.html?token=${token}`;
+        
+        // Trigger the Notification Service
+        const emailSent = await sendNotification('PASSWORD_RESET', userEmail, {
+            link: resetLink
+        });
+
+        if (!emailSent) {
+            console.error("LOG: Notification failed to send");
+            return res.status(500).json({ error: "Failed to send reset email." });
+        }
+
+        console.log("LOG: Reset email dispatched successfully");
         res.json({ message: "A reset link has been sent to your email." });
 
     } catch (err) {
