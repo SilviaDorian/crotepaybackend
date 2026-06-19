@@ -69,14 +69,14 @@ router.post('/flutterwave', async (req, res) => {
                      VALUES ($1, $2, $3, 0, 0, NOW())
                      ON CONFLICT (user_email, currency) 
                      DO UPDATE SET escrow_balance = wallets.escrow_balance + EXCLUDED.escrow_balance, updated_at = NOW()`,
-                    [v.recipient_email, v.currency.toUpperCase(), Number(v.amount)]
+                    [v.creator_email, v.currency.toUpperCase(), Number(v.amount)]
                 );
                 
                 // Record Transaction
                 await client.query(
                     `INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, currency, status, reference_id, created_at, updated_at)
                      VALUES ($1, $2, 'ESCROW_DEPOSIT', $3, $4, 'SUCCESSFUL', $5, NOW(), NOW())`,
-                    [v.recipient_email, v.id, Number(v.amount), v.currency, `FLW-${String(payload.data.id)}`]
+                    [v.creator_email, v.id, Number(v.amount), v.currency, `FLW-${String(payload.data.id)}`]
                 );
                 
                 console.log(`✅ Single voucher processed: ${ref}`);
