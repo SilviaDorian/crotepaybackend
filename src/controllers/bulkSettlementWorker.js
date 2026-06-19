@@ -1,4 +1,5 @@
 import { getClient } from '../db/index.js';
+import { sendNotification } from '../services/notificationService.js'; // Ensure path is correct
 
 async function creditEscrowWallet(client, voucher) {
     const amount = Number(voucher.amount);
@@ -64,6 +65,17 @@ export async function processBulkEscrowFunding(batchRef = null) {
                 await creditEscrowWallet(client, voucher);
                 fundedCount++;
                 console.log(`✅ FUNDED → ${voucher.recipient_email} | ${voucher.amount} ${voucher.currency} (${voucher.id})`);
+
+                // --- TRIGGER NOTIFICATION HERE ---
+        // We use recipient_email and the voucher details available in the loop
+        sendNotification('VOUCHER_LOCKED', voucher.recipient_email, {
+            full_name: voucher.recipient_name || 'User', // Ensure your DB select gets this
+            voucher_ref: voucher.id,
+            amount: voucher.amount,
+            currency: voucher.currency,
+            cta_link: "https://fielpay.free.nf/login.html"
+        }).catch(err => console.error(`❌ Failed to send bulk lock email to ${voucher.recipient_email}:`, err));
+        
             } catch (e) {
                 console.error(`❌ Failed voucher ${voucher.id}:`, e.message);
             }

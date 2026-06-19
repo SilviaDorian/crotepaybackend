@@ -1,5 +1,6 @@
 import express from 'express';
 import { getClient } from '../db/index.js';
+import { sendNotification } from '../services/notificationService.js'; // Ensure path is correct
 
 const router = express.Router();
 
