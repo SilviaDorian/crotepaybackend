@@ -101,6 +101,63 @@ router.post('/login', async (req, res) => {
 });
 
 /**
+ * 8. FORGOT PASSWORD: Generate Token
+ */
+router.post('/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    const genericResponse = { message: "If that email is registered, a reset link has been sent." };
+    
+    try {
+        const userEmail = email.toLowerCase().trim();
+        const userResult = await query('SELECT id FROM public.users WHERE email = $1', [userEmail]);
+        
+        if (userResult.rows.length === 0) return res.json(genericResponse);
+
+        const token = crypto.randomBytes(32).toString('hex');
+        const expiresAt = new Date(Date.now() + 3600000); // 1 hour expiry
+
+        await query('UPDATE public.users SET reset_token = $1, reset_expires_at = $2 WHERE email = $3', 
+            [token, expiresAt, userEmail]);
+
+        // Integrate your mailing service here
+        // await sendEmail(userEmail, "Reset your password", `Your link: ${process.env.FRONTEND_URL}/reset-password?token=${token}`);
+        
+        res.json(genericResponse);
+    } catch (err) {
+        res.status(500).json({ error: "Server error." });
+    }
+});
+
+/**
+ * 9. RESET PASSWORD: Validate Token & Update
+ */
+router.post('/reset-password', async (req, res) => {
+    const { token, newPassword } = req.body;
+    
+    try {
+        const userResult = await query(
+            'SELECT id FROM public.users WHERE reset_token = $1 AND reset_expires_at > NOW()', 
+            [token]
+        );
+        
+        if (userResult.rows.length === 0) {
+            return res.status(400).json({ error: "Invalid or expired token." });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        
+        await query(
+            'UPDATE public.users SET password_hash = $1, reset_token = NULL, reset_expires_at = NULL WHERE id = $2', 
+            [hashedPassword, userResult.rows[0].id]
+        );
+        
+        res.json({ success: true, message: "Password reset successful." });
+    } catch (err) {
+        res.status(500).json({ error: "Reset failed." });
+    }
+});
+
+/**
  * 3. TIER 2: REQUEST PHONE OTP
  */
 router.post('/request-phone-otp', async (req, res) => {
