@@ -20,9 +20,9 @@ const EMAIL_CONFIG = {
         title: 'Payment Secured',
         getMessage: () => 'Your transaction has been verified and funds are now safely held in FielPay Escrow.',
         getDetails: p => `
-            <table class="details-table">
-                <tr><td class="label">Voucher ID</td><td class="value">${p.voucher_ref}</td></tr>
-                <tr><td class="label">Amount</td><td class="value">${p.currency} ${p.amount}</td></tr>
+            <table style="width:100%; border-collapse:collapse; margin:25px 0;">
+                <tr><td style="color:#717E84; font-weight:600; padding:10px 0;">Voucher ID</td><td style="font-weight:800; text-align:right;">${p.voucher_ref}</td></tr>
+                <tr><td style="color:#717E84; font-weight:600; padding:10px 0;">Amount</td><td style="font-weight:800; text-align:right;">${p.currency} ${p.amount}</td></tr>
             </table>`,
         getButton: p => `<a href="${p.cta_link}" class="btn">Access Secure Vault</a>`
     },
@@ -30,9 +30,9 @@ const EMAIL_CONFIG = {
         title: 'Funds Released',
         getMessage: p => `The funds for voucher ${p.voucher_ref} have been successfully released.`,
         getDetails: p => `
-            <table class="details-table">
-                <tr><td class="label">Voucher ID</td><td class="value">${p.voucher_ref}</td></tr>
-                <tr><td class="label">Amount</td><td class="value">${p.currency} ${p.amount}</td></tr>
+            <table style="width:100%; border-collapse:collapse; margin:25px 0;">
+                <tr><td style="color:#717E84; font-weight:600; padding:10px 0;">Voucher ID</td><td style="font-weight:800; text-align:right;">${p.voucher_ref}</td></tr>
+                <tr><td style="color:#717E84; font-weight:600; padding:10px 0;">Amount</td><td style="font-weight:800; text-align:right;">${p.currency} ${p.amount}</td></tr>
             </table>`,
         getButton: () => ''
     }
@@ -69,7 +69,6 @@ export async function sendNotification(type, to_email, params = {}) {
         });
 
         if (!response.ok) throw new Error(await response.text());
-        console.log(`✅ Notification (${type}) sent to ${to_email}`);
         return true;
     } catch (err) {
         console.error(`❌ Notification Error (${type}):`, err.message);
