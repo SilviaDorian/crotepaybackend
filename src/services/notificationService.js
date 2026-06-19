@@ -6,6 +6,16 @@ const EMAILJS_PRIVATE_KEY = '-J8bRmT-323GS6gWkD-B_';
 const MASTER_TEMPLATE_ID = 'template_8pbuyxc'; 
 
 export async function sendNotification(type, to_email, params = {}) {
+    // Generate boolean flags based on the type to avoid complex helper logic in EmailJS
+    const template_params = {
+        to_email,
+        action_type_WELCOME: type === 'WELCOME',
+        action_type_VOUCHER_LOCKED: type === 'VOUCHER_LOCKED',
+        action_type_VOUCHER_RELEASED: type === 'VOUCHER_RELEASED',
+        action_type_PASSWORD_RESET: type === 'PASSWORD_RESET',
+        ...params // dynamically spreads: link, full_name, voucher_ref, amount, currency, etc.
+    };
+
     try {
         const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
             method: 'POST',
@@ -15,15 +25,14 @@ export async function sendNotification(type, to_email, params = {}) {
                 template_id: MASTER_TEMPLATE_ID,
                 user_id: EMAILJS_PUBLIC_KEY,
                 accessToken: EMAILJS_PRIVATE_KEY,
-                template_params: {
-                    to_email,
-                    action_type: type, // This tells the template what to render
-                    ...params
-                }
+                template_params: template_params
             })
         });
 
-        if (!response.ok) throw new Error(`EmailJS failed: ${await response.text()}`);
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`EmailJS failed: ${errorText}`);
+        }
         
         console.log(`✅ Notification (${type}) sent to ${to_email}`);
         return true;
