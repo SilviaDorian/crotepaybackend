@@ -40,9 +40,9 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 
 // --- CORS Configuration ---
 const corsOptions = {
-    origin: ['https://fielpay.free.nf', 'http://fielpay.free.nf', 'http://localhost:3000'],
+    origin: ['https://fielpay.free.nf', 'http://fielpay.free.nf', 'http://localhost:3000', 'https://fielpdrwho.netlify.app',],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'verif-hash'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'verif-hash', 'x-admin-key'],
     credentials: true,
     optionsSuccessStatus: 200
 };
