@@ -113,4 +113,23 @@ router.post('/resolve-dispute', authorizeAdmin, async (req, res) => {
     }
 });
 
+// --- GET DISPUTES QUEUE ---
+router.get('/disputes', authorizeAdmin, async (req, res) => {
+    try {
+        const queryText = `
+            SELECT 
+                id, creator_email, recipient_email, amount, currency, 
+                description, dispute_reason, dispute_story, created_at
+            FROM public.vouchers 
+            WHERE status = 'DISPUTED'
+            ORDER BY created_at DESC`;
+        
+        const { rows } = await query(queryText);
+        res.json({ success: true, disputes: rows });
+    } catch (err) {
+        console.error("Disputes Fetch Error:", err);
+        res.status(500).json({ error: "Failed to fetch disputes" });
+    }
+});
+
 export default router;
