@@ -321,23 +321,31 @@ router.get('/me/:email', async (req, res) => {
     }
 });
 
-app.post('/subscribe', async (req, res) => {
-    // Assuming you have middleware that verifies the user and attaches their email to req.user
-    const { email } = req.user; 
-    const subscriptionData = req.body;
+/**
+ * SUBSCRIBE: Saves push notification subscription
+ */
+router.post('/subscribe', async (req, res) => {
+    // We pull the email directly from the body, since your frontend sends it there
+    const { email, subscription } = req.body;
+
+    if (!email || !subscription) {
+        return res.status(400).json({ error: 'Email and subscription data are required' });
+    }
 
     try {
-        const { error } = await supabase
-            .from('subscriptions')
-            .upsert({ 
-                email: email, 
-                subscription_data: subscriptionData 
-            });
+        // We use your established 'query' function to interact with your database
+        // This assumes you have a 'subscriptions' table with columns 'email' and 'subscription_data'
+        await query(
+            `INSERT INTO subscriptions (email, subscription_data) 
+             VALUES ($1, $2) 
+             ON CONFLICT (email) 
+             DO UPDATE SET subscription_data = $2`,
+            [email, JSON.stringify(subscription)]
+        );
 
-        if (error) throw error;
-        res.status(201).json({ message: 'Subscribed successfully' });
+        res.status(201).json({ success: true, message: 'Subscribed successfully' });
     } catch (error) {
-        console.error('Database error:', error);
+        console.error('Database error in /subscribe:', error);
         res.status(500).json({ error: 'Failed to save subscription' });
     }
 });
