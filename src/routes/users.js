@@ -321,4 +321,25 @@ router.get('/me/:email', async (req, res) => {
     }
 });
 
+app.post('/subscribe', async (req, res) => {
+    // Assuming you have middleware that verifies the user and attaches their email to req.user
+    const { email } = req.user; 
+    const subscriptionData = req.body;
+
+    try {
+        const { error } = await supabase
+            .from('subscriptions')
+            .upsert({ 
+                email: email, 
+                subscription_data: subscriptionData 
+            });
+
+        if (error) throw error;
+        res.status(201).json({ message: 'Subscribed successfully' });
+    } catch (error) {
+        console.error('Database error:', error);
+        res.status(500).json({ error: 'Failed to save subscription' });
+    }
+});
+
 export default router;
