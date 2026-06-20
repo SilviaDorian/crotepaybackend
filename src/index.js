@@ -21,6 +21,7 @@ import { processBulkEscrowFunding } from './controllers/bulkSettlementWorker.js'
 
 // Import Routes
 import historyRoutes from './routes/history.js';
+import revenueRoutes from './routes/revenue.js';
 import webhookRoutes from './routes/webhooks.js';
 import userRoutes from './routes/users.js';
 import voucherRoutes from './routes/vouchers.js';
@@ -62,6 +63,7 @@ app.use('/withdraw', withdrawRoutes);
 app.use('/converter', converterRoutes);
 app.use('/history', historyRoutes);
 app.use('/wallets', walletRoutes);
+app.use('/revenue', revenueRoutes);
 app.use('/settle-clearance', ledgerTriggerRoutes);
 app.use('/api/admin', adminRouter); // This MUST exist
 
