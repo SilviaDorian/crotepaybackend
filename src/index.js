@@ -4,6 +4,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import { query } from './db/index.js';
+import adminRouter from './routes/admin.js'; // Make sure the path is correct
 
 // Import Controllers
 import {
@@ -20,7 +21,6 @@ import { processBulkEscrowFunding } from './controllers/bulkSettlementWorker.js'
 
 // Import Routes
 import historyRoutes from './routes/history.js';
-import revenueRoutes from './routes/revenue.js';
 import webhookRoutes from './routes/webhooks.js';
 import userRoutes from './routes/users.js';
 import voucherRoutes from './routes/vouchers.js';
@@ -62,8 +62,8 @@ app.use('/withdraw', withdrawRoutes);
 app.use('/converter', converterRoutes);
 app.use('/history', historyRoutes);
 app.use('/wallets', walletRoutes);
-app.use('/revenue', revenueRoutes);
 app.use('/settle-clearance', ledgerTriggerRoutes);
+app.use('/api/admin', adminRouter); // This MUST exist
 
 // --- Bulk Operations (All prefixed removed) ---
 app.post('/bulk/create', createBulkEscrow);

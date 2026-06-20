@@ -1,109 +1,113 @@
 import express from 'express';
-import { getClient } from '../db/index.js';
+import { getClient, query } from '../db/index.js';
+import { triggerBankTransfer } from '../utils/payout.js';
 
 const router = express.Router();
 const OWNER_EMAIL = 'deepxverified@gmail.com';
 
-/**
- * POST /api/admin/resolve-dispute
- * Manually move funds based on admin investigation.
- */
-router.post('/resolve-dispute', async (req, res) => {
+// Middleware: Admin Security
+const authorizeAdmin = (req, res, next) => {
     const adminKey = req.headers['x-admin-key'];
     if (!adminKey || adminKey !== process.env.ADMIN_SECRET) {
-        return res.status(401).json({ error: "Unauthorized: Invalid Admin Key" });
+        return res.status(401).json({ error: "Unauthorized" });
     }
+    next();
+};
 
-    const { voucher_id, resolution, adminNote } = req.body; 
-
-    const client = await getClient();
-
+// Audit Logger Helper
+const logAction = async (action, target_id, details) => {
     try {
-        await client.query('BEGIN');
-        // Ensure search path is correct for Enum types
-        await client.query('SET search_path TO public');
-        
-        const result = await client.query("SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", [voucher_id]);
-        const v = result.rows[0];
+        await query(
+            `INSERT INTO admin_audit_logs (admin_email, action, target_id, details) 
+             VALUES ($1, $2, $3, $4)`,
+            [OWNER_EMAIL, action, target_id, JSON.stringify(details)]
+        );
+    } catch (err) {
+        console.error("Audit Logging Failed:", err);
+    }
+};
 
-        if (!v) throw new Error("Voucher not found.");
-        if (v.status !== 'DISPUTED') throw new Error("Voucher is not in a DISPUTED state.");
+// --- REVENUE & STATS ---
+router.get('/stats', authorizeAdmin, async (req, res) => {
+    try {
+        const stats = await query(`SELECT SUM(fee) as total_revenue, COUNT(*) as total_transactions 
+                                   FROM public.transactions WHERE status = 'SUCCESSFUL'::text::voucher_status`);
+        const balance = await query("SELECT available_balance FROM public.wallets WHERE user_email = $1", [OWNER_EMAIL]);
+        res.json({
+            success: true,
+            data: {
+                lifetime_fees: parseFloat(stats.rows[0].total_revenue || 0).toFixed(4),
+                withdrawable_revenue: parseFloat(balance.rows[0]?.available_balance || 0).toFixed(4),
+                total_deals: stats.rows[0].total_transactions
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ error: "Stats error" });
+    }
+});
+
+router.post('/withdraw', authorizeAdmin, async (req, res) => {
+    const { amount, bankCode, accountNumber, currency } = req.body;
+    let client;
+    try {
+        client = await getClient();
+        await client.query('BEGIN');
+        
+        const walletRes = await client.query("SELECT available_balance FROM wallets WHERE user_email = $1 FOR UPDATE", [OWNER_EMAIL]);
+        if (walletRes.rows.length === 0 || walletRes.rows[0].available_balance < amount) throw new Error("Insufficient funds");
+
+        await client.query("UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2", [amount, OWNER_EMAIL]);
+        const reference = `REV-WD-${Date.now()}`;
+        
+        await client.query(`INSERT INTO transactions (user_email, transaction_type, amount, status, reference_id) 
+                            VALUES ($1, 'SYSTEM_WITHDRAWAL', $2, 'PROCESSING'::text::voucher_status, $3)`, [OWNER_EMAIL, amount, reference]);
+
+        await triggerBankTransfer({ amount, currency: currency || 'NGN', bankCode, accountNumber, reference });
+        
+        // Log the withdrawal
+        await logAction('WITHDRAWAL', reference, { amount, currency, bankCode });
+        
+        await client.query('COMMIT');
+        res.json({ success: true, message: "Withdrawal initiated" });
+    } catch (err) {
+        if (client) await client.query('ROLLBACK');
+        res.status(400).json({ error: err.message });
+    } finally {
+        if (client) client.release();
+    }
+});
+
+// --- DISPUTE RESOLUTION ---
+router.post('/resolve-dispute', authorizeAdmin, async (req, res) => {
+    const { voucher_id, resolution, adminNote } = req.body;
+    let client;
+    try {
+        client = await getClient();
+        await client.query('BEGIN');
+        
+        const v = (await client.query("SELECT * FROM vouchers WHERE id = $1 FOR UPDATE", [voucher_id])).rows[0];
+        if (!v || v.status !== 'DISPUTED') throw new Error("Invalid state");
 
         const amount = parseFloat(v.amount);
-        const fee = parseFloat((amount * 0.07).toFixed(4));
-        const netAmount = amount - fee;
+        const fee = amount * 0.07;
 
         if (resolution === 'PAY_CREATOR') {
-            // Deduct from Recipient Escrow
-            await client.query(
-                "UPDATE wallets SET escrow_balance = escrow_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3",
-                [amount, v.recipient_email, v.currency]
-            );
-
-            // Add Net to Creator (Using the verified UNIQUE constraint logic)
-            await client.query(`
-                INSERT INTO wallets (user_email, available_balance, currency) 
-                VALUES ($1, $2, $3)
-                ON CONFLICT (user_email, currency) DO UPDATE SET 
-                available_balance = wallets.available_balance + $2, updated_at = NOW()`,
-                [v.creator_email, netAmount, v.currency]
-            );
-
-            // Add Fee to Admin
-            await client.query(`
-                UPDATE wallets SET 
-                    available_balance = available_balance + $1, 
-                    updated_at = NOW() 
-                WHERE user_email = $2 AND currency = $3`,
-                [fee, OWNER_EMAIL, v.currency]
-            );
-
-            await client.query(`
-                UPDATE vouchers 
-                SET status = 'RELEASED'::text::voucher_status, 
-                    updated_at = NOW(), 
-                    description = CONCAT(description, ' | Admin Note: ', $1::text) 
-                WHERE id = $2`, 
-                [adminNote || "Resolved in favor of creator", voucher_id]
-            );
-
-        } else if (resolution === 'REFUND_RECIPIENT') {
-            // Buyer Wins - Refund to Available Balance
-            await client.query(`
-                UPDATE wallets SET 
-                    escrow_balance = escrow_balance - $1,
-                    available_balance = available_balance + $1,
-                    updated_at = NOW()
-                WHERE user_email = $2 AND currency = $3`,
-                [amount, v.recipient_email, v.currency]
-            );
-
-            await client.query(`
-                UPDATE vouchers 
-                SET status = 'REFUNDED'::text::voucher_status, 
-                    updated_at = NOW(), 
-                    description = CONCAT(description, ' | Admin Note: ', $1::text) 
-                WHERE id = $2`, 
-                [adminNote || "Resolved in favor of recipient", voucher_id]
-            );
-
+            await client.query("UPDATE wallets SET escrow_balance = escrow_balance - $1 WHERE user_email = $2 AND currency = $3", [amount, v.recipient_email, v.currency]);
+            await client.query("UPDATE wallets SET available_balance = available_balance + $1 WHERE user_email = $2 AND currency = $3", [amount - fee, v.creator_email, v.currency]);
+            await client.query("UPDATE wallets SET available_balance = available_balance + $1 WHERE user_email = $2 AND currency = $3", [fee, OWNER_EMAIL, v.currency]);
+            await client.query("UPDATE vouchers SET status = 'RELEASED'::text::voucher_status, description = CONCAT(description, ' | Admin Note: ', $1::text) WHERE id = $2", [adminNote || "Resolved in favor of creator", voucher_id]);
         } else {
-            throw new Error("Invalid resolution.");
+            await client.query("UPDATE wallets SET escrow_balance = escrow_balance - $1, available_balance = available_balance + $1 WHERE user_email = $2 AND currency = $3", [amount, v.recipient_email, v.currency]);
+            await client.query("UPDATE vouchers SET status = 'REFUNDED'::text::voucher_status, description = CONCAT(description, ' | Admin Note: ', $1::text) WHERE id = $2", [adminNote || "Resolved in favor of recipient", voucher_id]);
         }
-
-        // FIXED: amount_usd -> amount | fee_usd -> fee | Added ::text::voucher_status
-        await client.query(`
-            INSERT INTO transactions (user_email, voucher_id, transaction_type, amount, fee, status, reference_id, currency) 
-            VALUES ($1, $2, 'ADMIN_RESOLUTION', $3, $4, 'SUCCESSFUL'::text::voucher_status, $5, $6)`,
-            [v.recipient_email, v.id, amount, (resolution === 'PAY_CREATOR' ? fee : 0), `ADM-${v.id}`, v.currency]
-        );
-
+        
+        // Log the resolution
+        await logAction('RESOLVE_DISPUTE', voucher_id, { resolution, adminNote });
+        
         await client.query('COMMIT');
-        res.json({ success: true, message: `Dispute resolved.` });
-
+        res.json({ success: true });
     } catch (e) {
         if (client) await client.query('ROLLBACK');
-        console.error("Admin Resolve Error:", e.message);
         res.status(400).json({ error: e.message });
     } finally {
         if (client) client.release();
