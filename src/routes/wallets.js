@@ -3,63 +3,20 @@ import { query } from '../db/index.js';
 
 const router = express.Router();
 
-/**
- * 1. GET BALANCE & STATS
- * Implemented "On-Demand Lazy Settlement" to avoid cron jobs.
- * Funds settle automatically when the dashboard is visited (at most once per hour).
- */
 router.get('/dashboard/:email', async (req, res) => {
     const { email } = req.params;
     let client;
 
     try {
         client = await getClient();
-        
-        // 1. RATE-LIMITING: Only settle if at least 1 hour has passed
-        const checkRes = await client.query(
-            "SELECT last_settled_at FROM public.wallets WHERE user_email = $1", 
-            [email]
-        );
 
-        const lastSettled = checkRes.rows[0]?.last_settled_at;
-        const needsSettlement = !lastSettled || (new Date() - new Date(lastSettled)) > 3600000;
-
-        if (needsSettlement) {
-            await client.query('BEGIN');
-
-            // 2. ATOMIC SETTLEMENT: Find and settle matured vouchers for the user
-            // This covers both CREATOR (Single) and RECIPIENT (Bulk) roles
-            const settlementRes = await client.query(`
-                UPDATE public.vouchers
-                SET status = 'SETTLED'
-                WHERE (recipient_email = $1 OR creator_email = $1)
-                AND status = 'RELEASED' 
-                AND (NOW() - locked_at) >= INTERVAL '5 minute'
-                RETURNING amount
-            `, [email]);
-
-            const totalToSettle = settlementRes.rows.reduce((sum, row) => sum + parseFloat(row.amount), 0);
-
-            // 3. Update wallet balance and timestamp
-            await client.query(`
-                UPDATE public.wallets
-                SET 
-                    available_balance = available_balance + $1,
-                    awaiting_settlement = awaiting_settlement - $1,
-                    last_settled_at = NOW()
-                WHERE user_email = $2
-            `, [totalToSettle, email]);
-
-            await client.query('COMMIT');
-        }
-
-        // 4. Fetch updated Wallet Stats
+        // 1. Fetch updated Wallet Stats (Directly)
         const walletRes = await client.query(
             "SELECT available_balance, escrow_balance, awaiting_settlement, currency FROM public.wallets WHERE user_email = $1", 
             [email]
         );
         
-        // 5. Updated Voucher Aggregates
+        // 2. Updated Voucher Aggregates
         const statsRes = await client.query(
             `SELECT 
                 COUNT(*) FILTER (WHERE status = 'LOCKED') as active_escrows,
@@ -70,7 +27,8 @@ router.get('/dashboard/:email', async (req, res) => {
             [email]
         );
 
-        // 6. Get the next upcoming release date
+        // 3. Get the next upcoming release date
+        // Note: Only look for RELEASED status; SETTLED items are already done
         const upcomingRelease = await client.query(
             `SELECT (locked_at + INTERVAL '72 hours') as release_at
              FROM public.vouchers 
@@ -91,7 +49,6 @@ router.get('/dashboard/:email', async (req, res) => {
             }
         });
     } catch (err) {
-        if (client) await client.query('ROLLBACK');
         console.error("Dashboard Stats Error:", err.message);
         res.status(500).json({ error: "Internal server error" });
     } finally {
