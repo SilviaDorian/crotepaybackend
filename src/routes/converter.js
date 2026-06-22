@@ -79,44 +79,47 @@ router.post('/convert', async (req, res) => {
         const rate = await getLiveRate(fromCurrency, toCurrency, netAmountToConvert);
         const convertedAmount = netAmountToConvert * rate;
 
+        // START TRANSACTION
         await query('BEGIN');
         
-        // 2. Lock Source Funds: Deduct from Available
+        // 2. Lock Source Funds
         await query(
             "UPDATE public.wallets SET available_balance = available_balance - $1 WHERE user_email = $2 AND currency = $3", 
             [numericAmount, userEmail, fromCurrency]
         );
 
         // 3. Log Transaction as PENDING
-        // Note: Metadata contains { toCurrency, convertedAmount } for webhook processing
         await query(`
             INSERT INTO public.transactions 
             (user_email, transaction_type, amount, fee, currency, status, reference_id, metadata, created_at) 
-            VALUES ($1, 'CONVERSION', $2, $3, $4, $5, $6, $7, NOW())`,
+            VALUES ($1, 'CONVERSION', $2, $3, $4, 'PENDING', $5, $6, NOW())`,
             [
-                userEmail,          // $1
-                numericAmount,      // $2
-                fee,                // $3
-                fromCurrency,       // $4
-                'PENDING',          // $5
-                reference,          // $6
-                JSON.stringify({ toCurrency, convertedAmount }) // $7
+                userEmail, 
+                numericAmount, 
+                fee, 
+                fromCurrency, 
+                'PENDING', 
+                reference,
+                JSON.stringify({ toCurrency, convertedAmount })
             ]
         );
-            
-        await query('COMMIT');
-
-        // 4. Instant trigger Flutterwave
+        
+        // TRIGGER FLUTTERWAVE BEFORE COMMITTING
         const flwRes = await triggerFlutterwaveTransfer(numericAmount, fromCurrency, toCurrency, reference);
         
         if (flwRes.status !== 'success') {
-            console.error("FLW Trigger Failed:", flwRes);
-            return res.status(500).json({ message: "Flutterwave transfer failed to initiate." });
+            console.error("FLW Trigger Failed - Rolling Back:", flwRes);
+            await query('ROLLBACK'); // Reverts the wallet deduction and the log entry
+            return res.status(500).json({ message: "Flutterwave transfer failed, transaction cancelled." });
         }
 
+        // COMMIT ONLY IF FLUTTERWAVE SUCCEEDED
+        await query('COMMIT');
         res.json({ success: true, message: "Conversion initiated successfully." });
+
     } catch (err) {
-        await query('ROLLBACK');
+        await query('ROLLBACK'); // Safety catch for DB errors
+        console.error("Conversion Transaction Error:", err);
         res.status(500).json({ message: "Transaction failed: " + err.message });
     }
 });
