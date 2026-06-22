@@ -34,7 +34,7 @@ router.get('/dashboard/:email', async (req, res) => {
                 SET status = 'SETTLED'
                 WHERE (recipient_email = $1 OR creator_email = $1)
                 AND status = 'RELEASED' 
-                AND (NOW() - locked_at) >= INTERVAL '72 hours'
+                AND (NOW() - locked_at) >= INTERVAL '5 minute'
                 RETURNING amount
             `, [email]);
 
