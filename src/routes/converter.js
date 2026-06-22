@@ -88,12 +88,21 @@ router.post('/convert', async (req, res) => {
         );
 
         // 3. Log as PENDING
-        await query(`
-            INSERT INTO public.transactions 
-            (user_email, transaction_status, amount, fee, from_currency, to_currency, converted_amount, status, created_at, reference) 
-            VALUES ($1, 'CONVERSION', $2, $3, $4, $5, $6, 'PENDING', NOW(), $7)`,
-            [userEmail, numericAmount, fee, fromCurrency, toCurrency, convertedAmount, reference]
-        );
+        // 3. Log as PENDING
+await query(`
+    INSERT INTO public.transactions 
+    (user_email, transaction_type, amount, fee, currency, status, reference_id, created_at) 
+    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+    [
+        userEmail, 
+        'CONVERSION', 
+        numericAmount, 
+        fee, 
+        fromCurrency, 
+        'PENDING', 
+        reference
+    ]
+);
             
         await query('COMMIT');
 
