@@ -66,7 +66,7 @@ router.post('/convert', async (req, res) => {
         const fee = numericAmount * CONVERSION_FEE_PERCENT;
         const netAmountToConvert = numericAmount - fee; 
 
-        // 1. Check Balance
+        // 1. Check Source Balance
         const walletRes = await query(
             "SELECT available_balance FROM public.wallets WHERE user_email = $1 AND currency = $2",
             [userEmail, fromCurrency]
@@ -81,38 +81,41 @@ router.post('/convert', async (req, res) => {
 
         await query('BEGIN');
         
-        // 2. Move to Awaiting Settlement
+        // 2. Lock Source Funds: Deduct from Available
         await query(
-            "UPDATE public.wallets SET available_balance = available_balance - $1, awaiting_settlement = awaiting_settlement + $1 WHERE user_email = $2 AND currency = $3", 
+            "UPDATE public.wallets SET available_balance = available_balance - $1 WHERE user_email = $2 AND currency = $3", 
             [numericAmount, userEmail, fromCurrency]
         );
 
-        // 3. Log as PENDING
-        // 3. Log as PENDING
-await query(`
-    INSERT INTO public.transactions 
-    (user_email, transaction_type, amount, fee, currency, status, reference_id, created_at) 
-    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
-    [
-        userEmail, 
-        'CONVERSION', 
-        numericAmount, 
-        fee, 
-        fromCurrency, 
-        'PENDING', 
-        reference
-    ]
-);
+        // 3. Log Transaction as PENDING
+        // Note: We store the 'convertedAmount' in metadata or a separate column 
+        // so your webhook knows exactly how much to credit the destination wallet.
+        await query(`
+            INSERT INTO public.transactions 
+            (user_email, transaction_type, amount, fee, currency, status, reference_id, metadata, created_at) 
+            VALUES ($1, 'CONVERSION', $2, $3, $4, 'PENDING', $5, $6, NOW())`,
+            [
+                userEmail, 
+                numericAmount, 
+                fee, 
+                fromCurrency, 
+                'PENDING', 
+                reference,
+                JSON.stringify({ toCurrency, convertedAmount }) // Stored for webhook lookup
+            ]
+        );
             
         await query('COMMIT');
 
-        // 4. Instant trigger
-        triggerFlutterwaveTransfer(numericAmount, fromCurrency, toCurrency, reference)
-            .then(flwRes => {
-                if (flwRes.status !== 'success') console.error("FLW Failed:", flwRes);
-            });
+        // 4. Instant trigger Flutterwave
+        const flwRes = await triggerFlutterwaveTransfer(numericAmount, fromCurrency, toCurrency, reference);
+        
+        if (flwRes.status !== 'success') {
+            console.error("FLW Trigger Failed:", flwRes);
+            return res.status(500).json({ message: "Flutterwave transfer failed to initiate." });
+        }
 
-        res.json({ success: true, message: "Conversion initiated." });
+        res.json({ success: true, message: "Conversion initiated successfully." });
     } catch (err) {
         await query('ROLLBACK');
         res.status(500).json({ message: "Transaction failed: " + err.message });

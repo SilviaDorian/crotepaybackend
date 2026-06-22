@@ -51,6 +51,31 @@ router.post('/flutterwave', async (req, res) => {
             if (lockRes.rowCount === 0) {
                 console.log(`⚠️ WARNING: No vouchers found with status 'PENDING' for batch ${ref}. Check database!`);
             }
+
+            } else if (isConversion) {
+    // NEW: Handle Currency Conversion Completion
+    console.log(`🔄 Finalizing conversion: ${ref}`);
+    
+    // 1. Get the transaction details (to get the converted amount)
+    const txRes = await client.query(
+        "UPDATE transactions SET status = 'SUCCESSFUL', updated_at = NOW() WHERE reference_id = $1 AND status = 'PENDING' RETURNING *",
+        [ref]
+    );
+
+    if (txRes.rowCount > 0) {
+        const tx = txRes.rows[0];
+        const metadata = tx.metadata; // Assuming you stored { toCurrency, convertedAmount } here
+        
+        // 2. Credit the destination wallet
+        await client.query(
+            `INSERT INTO wallets (user_email, currency, available_balance, updated_at)
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (user_email, currency) 
+             DO UPDATE SET available_balance = wallets.available_balance + EXCLUDED.available_balance, updated_at = NOW()`,
+            [tx.user_email, metadata.toCurrency, Number(metadata.convertedAmount)]
+        );
+        console.log(`✅ Conversion ${ref} successful. Credited ${metadata.convertedAmount} ${metadata.toCurrency}`);
+    }
         } else {
             // SINGLE VOUCHER LOCKING AND WALLET FUNDING
             console.log(`🔄 Attempting to lock single voucher: ${ref}`);
