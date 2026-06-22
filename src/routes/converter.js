@@ -88,20 +88,19 @@ router.post('/convert', async (req, res) => {
         );
 
         // 3. Log Transaction as PENDING
-        // Note: We store the 'convertedAmount' in metadata or a separate column 
-        // so your webhook knows exactly how much to credit the destination wallet.
+        // Note: Metadata contains { toCurrency, convertedAmount } for webhook processing
         await query(`
             INSERT INTO public.transactions 
             (user_email, transaction_type, amount, fee, currency, status, reference_id, metadata, created_at) 
-            VALUES ($1, 'CONVERSION', $2, $3, $4, 'PENDING', $5, $6, NOW())`,
+            VALUES ($1, 'CONVERSION', $2, $3, $4, $5, $6, $7, NOW())`,
             [
-                userEmail, 
-                numericAmount, 
-                fee, 
-                fromCurrency, 
-                'PENDING', 
-                reference,
-                JSON.stringify({ toCurrency, convertedAmount }) // Stored for webhook lookup
+                userEmail,          // $1
+                numericAmount,      // $2
+                fee,                // $3
+                fromCurrency,       // $4
+                'PENDING',          // $5
+                reference,          // $6
+                JSON.stringify({ toCurrency, convertedAmount }) // $7
             ]
         );
             
