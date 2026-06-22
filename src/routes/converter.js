@@ -5,7 +5,7 @@ import { getLiveRate } from '../utils/converterUtils.js';
 const router = express.Router();
 const CONVERSION_FEE_PERCENT = 0.02;
 
-// Helper: Initiate Flutterwave Transfer
+// Helper: Initiate Flutterwave Intra-Wallet Transfer
 async function triggerFlutterwaveTransfer(amount, from, to, reference) {
     try {
         const response = await fetch('https://api.flutterwave.com/v3/transfers', {
@@ -16,15 +16,17 @@ async function triggerFlutterwaveTransfer(amount, from, to, reference) {
             },
             body: JSON.stringify({
                 amount: amount,
-                currency: from,
-                destination_currency: to,
-                narration: `Conversion Ref: ${reference}`,
-                reference: reference
+                currency: to,              // The currency you want to receive (destination)
+                debit_currency: from,      // The currency you are spending (source)
+                account_bank: "flutterwave",
+                account_number: "100640506", // Your Merchant ID
+                reference: reference,
+                narration: `Conversion Ref: ${reference}`
             })
         });
         return await response.json();
     } catch (err) {
-        console.error("Flutterwave API Error:", err);
+        console.error("Flutterwave Intra-Wallet Transfer Error:", err);
         return { status: 'error' };
     }
 }
