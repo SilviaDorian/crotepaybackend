@@ -5,11 +5,6 @@ const router = express.Router();
 
 /**
  * 1. GET BALANCE & STATS
- * Implemented "Lazy Settlement" logic to automatically move 
- * funds from awaiting_settlement to available_balance.
- */
-/**
- * 1. GET BALANCE & STATS
  * Implemented "On-Demand Lazy Settlement" to avoid cron jobs.
  * Funds settle automatically only when the dashboard is visited,
  * and at most once per hour.
