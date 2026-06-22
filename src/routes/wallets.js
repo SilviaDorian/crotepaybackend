@@ -8,37 +8,63 @@ const router = express.Router();
  * Implemented "Lazy Settlement" logic to automatically move 
  * funds from awaiting_settlement to available_balance.
  */
+/**
+ * 1. GET BALANCE & STATS
+ * Implemented "On-Demand Lazy Settlement" to avoid cron jobs.
+ * Funds settle automatically only when the dashboard is visited,
+ * and at most once per hour.
+ */
 router.get('/dashboard/:email', async (req, res) => {
-    try {
-        const { email } = req.params;
+    const { email } = req.params;
+    let client;
 
-        // 1. ATOMIC SETTLEMENT: Move ONLY matured funds
-        // Calculation starts from 'locked_at' to satisfy the escrow duration rule.
-        await query(`
-            WITH matured_vouchers AS (
+    try {
+        client = await getClient();
+        
+        // 1. CHECK IF SETTLEMENT IS NEEDED (Rate-limiting logic)
+        const checkRes = await client.query(
+            "SELECT last_settled_at FROM public.wallets WHERE user_email = $1", 
+            [email]
+        );
+
+        const lastSettled = checkRes.rows[0]?.last_settled_at;
+        const needsSettlement = !lastSettled || (new Date() - new Date(lastSettled)) > 3600000;
+
+        if (needsSettlement) {
+            await client.query('BEGIN');
+
+            const settlementRes = await client.query(`
                 UPDATE public.vouchers
                 SET status = 'SETTLED'
                 WHERE recipient_email = $1 
                 AND status = 'RELEASED' 
                 AND (NOW() - locked_at) >= INTERVAL '72 hours'
                 RETURNING amount
-            )
-            UPDATE public.wallets
-            SET 
-                available_balance = available_balance + (SELECT COALESCE(SUM(amount), 0) FROM matured_vouchers),
-                awaiting_settlement = awaiting_settlement - (SELECT COALESCE(SUM(amount), 0) FROM matured_vouchers)
-            WHERE user_email = $1 
-            AND (SELECT COUNT(*) FROM matured_vouchers) > 0
-        `, [email]);
+            `, [email]);
+
+            const totalToSettle = settlementRes.rows.reduce((sum, row) => sum + parseFloat(row.amount), 0);
+
+            // Update wallet balance and the timestamp to throttle further checks
+            await client.query(`
+                UPDATE public.wallets
+                SET 
+                    available_balance = available_balance + $1,
+                    awaiting_settlement = awaiting_settlement - $1,
+                    last_settled_at = NOW()
+                WHERE user_email = $2
+            `, [totalToSettle, email]);
+
+            await client.query('COMMIT');
+        }
 
         // 2. Fetch updated Wallet Stats
-        const walletRes = await query(
+        const walletRes = await client.query(
             "SELECT available_balance, escrow_balance, awaiting_settlement, currency FROM public.wallets WHERE user_email = $1", 
             [email]
         );
         
         // 3. Updated Voucher Aggregates
-        const statsRes = await query(
+        const statsRes = await client.query(
             `SELECT 
                 COUNT(*) FILTER (WHERE status = 'LOCKED') as active_escrows,
                 COUNT(*) FILTER (WHERE status = 'RELEASED' OR status = 'SETTLED') as total_completed,
@@ -48,8 +74,8 @@ router.get('/dashboard/:email', async (req, res) => {
             [email]
         );
 
-        // 4. Get the next upcoming release date (based on locked_at + 72 hours)
-        const upcomingRelease = await query(
+        // 4. Get the next upcoming release date
+        const upcomingRelease = await client.query(
             `SELECT (locked_at + INTERVAL '72 hours') as release_at
              FROM public.vouchers 
              WHERE recipient_email = $1 AND status = 'RELEASED'
@@ -69,8 +95,11 @@ router.get('/dashboard/:email', async (req, res) => {
             }
         });
     } catch (err) {
+        if (client) await client.query('ROLLBACK');
         console.error("Dashboard Stats Error:", err.message);
         res.status(500).json({ error: "Internal server error" });
+    } finally {
+        if (client) client.release();
     }
 });
 
