@@ -6,8 +6,7 @@ const router = express.Router();
 /**
  * 1. GET BALANCE & STATS
  * Implemented "On-Demand Lazy Settlement" to avoid cron jobs.
- * Funds settle automatically only when the dashboard is visited,
- * and at most once per hour.
+ * Funds settle automatically when the dashboard is visited (at most once per hour).
  */
 router.get('/dashboard/:email', async (req, res) => {
     const { email } = req.params;
@@ -16,7 +15,7 @@ router.get('/dashboard/:email', async (req, res) => {
     try {
         client = await getClient();
         
-        // 1. CHECK IF SETTLEMENT IS NEEDED (Rate-limiting logic)
+        // 1. RATE-LIMITING: Only settle if at least 1 hour has passed
         const checkRes = await client.query(
             "SELECT last_settled_at FROM public.wallets WHERE user_email = $1", 
             [email]
@@ -28,10 +27,12 @@ router.get('/dashboard/:email', async (req, res) => {
         if (needsSettlement) {
             await client.query('BEGIN');
 
+            // 2. ATOMIC SETTLEMENT: Find and settle matured vouchers for the user
+            // This covers both CREATOR (Single) and RECIPIENT (Bulk) roles
             const settlementRes = await client.query(`
                 UPDATE public.vouchers
                 SET status = 'SETTLED'
-                WHERE recipient_email = $1 
+                WHERE (recipient_email = $1 OR creator_email = $1)
                 AND status = 'RELEASED' 
                 AND (NOW() - locked_at) >= INTERVAL '72 hours'
                 RETURNING amount
@@ -39,7 +40,7 @@ router.get('/dashboard/:email', async (req, res) => {
 
             const totalToSettle = settlementRes.rows.reduce((sum, row) => sum + parseFloat(row.amount), 0);
 
-            // Update wallet balance and the timestamp to throttle further checks
+            // 3. Update wallet balance and timestamp
             await client.query(`
                 UPDATE public.wallets
                 SET 
@@ -52,28 +53,28 @@ router.get('/dashboard/:email', async (req, res) => {
             await client.query('COMMIT');
         }
 
-        // 2. Fetch updated Wallet Stats
+        // 4. Fetch updated Wallet Stats
         const walletRes = await client.query(
             "SELECT available_balance, escrow_balance, awaiting_settlement, currency FROM public.wallets WHERE user_email = $1", 
             [email]
         );
         
-        // 3. Updated Voucher Aggregates
+        // 5. Updated Voucher Aggregates
         const statsRes = await client.query(
             `SELECT 
                 COUNT(*) FILTER (WHERE status = 'LOCKED') as active_escrows,
                 COUNT(*) FILTER (WHERE status = 'RELEASED' OR status = 'SETTLED') as total_completed,
                 COALESCE(SUM(amount) FILTER (WHERE status = 'LOCKED'), 0) as total_locked_value
              FROM public.vouchers 
-             WHERE recipient_email = $1`,
+             WHERE recipient_email = $1 OR creator_email = $1`,
             [email]
         );
 
-        // 4. Get the next upcoming release date
+        // 6. Get the next upcoming release date
         const upcomingRelease = await client.query(
             `SELECT (locked_at + INTERVAL '72 hours') as release_at
              FROM public.vouchers 
-             WHERE recipient_email = $1 AND status = 'RELEASED'
+             WHERE (recipient_email = $1 OR creator_email = $1) AND status = 'RELEASED'
              ORDER BY release_at ASC LIMIT 1`,
             [email]
         );
