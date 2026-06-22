@@ -237,19 +237,22 @@ export async function releaseBatch(req, res) {
 
         await client.query('COMMIT');
 
-        // --- TRIGGER RELEASE NOTIFICATION HERE ---
-try {
-    await sendNotification('VOUCHER_RELEASED', v.recipient_email, {
-        voucher_ref: v.id,
-        amount: amount,
-        currency: v.currency
-    });
-    console.log(`✅ VOUCHER_RELEASED notification sent to ${v.recipient_email}`);
-} catch (err) {
-    console.error(`❌ Failed to send release email for ${v.id}:`, err);
-}
+        // --- TRIGGER RELEASE NOTIFICATIONS INSIDE THE LOOP OR AFTER ---
+        // To send individual notifications, move it inside the loop 
+        // OR iterate through vResult.rows here:
+        for (const v of vResult.rows) {
+            try {
+                await sendNotification('VOUCHER_RELEASED', v.recipient_email, {
+                    voucher_ref: v.id,
+                    amount: parseFloat(v.amount),
+                    currency: v.currency
+                });
+                console.log(`✅ VOUCHER_RELEASED notification sent to ${v.recipient_email}`);
+            } catch (err) {
+                console.error(`❌ Failed to send release email for ${v.id}:`, err);
+            }
+        }
 
-  
         res.json({ success: true, message: "Batch released successfully." });
 
     } catch (e) {
