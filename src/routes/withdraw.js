@@ -89,8 +89,8 @@ router.post('/request/african', async (req, res) => {
 router.post('/request/international', async (req, res) => {
     const { email, amount, currency, bankName, accountNumber, swiftCode, routingNumber, beneficiaryName, beneficiaryAddress, beneficiaryCountry } = req.body;
     const targetCurrency = (currency || 'USD').toUpperCase();
-    const isTester = BYPASS_EMAILS.includes(email);
-
+    
+    // Validate minimum limits
     if (!amount || isNaN(amount) || !checkMinimumLimit(parseFloat(amount), targetCurrency)) {
         return res.status(400).json({ error: "Minimum withdrawal requirement not met." });
     }
@@ -111,34 +111,66 @@ router.post('/request/international', async (req, res) => {
 
         const requestedAmount = parseFloat(amount);
         const sourceCurrency = user.wallet_currency || 'USD';
-        
         const platformFee = requestedAmount * PLATFORM_FEE_PERCENT;
         const netAmount = requestedAmount - (requestedAmount * TOTAL_DEDUCTION_PERCENT);
         const flwRef = `WD-INT-${Date.now()}-${email.replace('@', '_at_')}`;
 
+        // 1. Database Audit: Deduct and update balances
         await client.query("UPDATE wallets SET available_balance = available_balance - $1, update_at = NOW() WHERE user_email = $2 AND currency = $3", [requestedAmount, email, sourceCurrency]);
         await client.query("UPDATE wallets SET available_balance = available_balance + $1, update_at = NOW() WHERE user_email = $2 AND currency = $3", [platformFee, PLATFORM_EMAIL, sourceCurrency]);
 
+        // 2. Operational Logging: Log the initiation before triggering transfer
+        console.log(`[INTERNATIONAL_WITHDRAWAL_INIT] Reference: ${flwRef} | User: ${email} | Amount: ${netAmount} ${targetCurrency}`);
+
         await triggerBankTransfer({
             amount: netAmount, sourceCurrency, targetCurrency, reference: flwRef, isInternational: true,
-            wirePayload: { account_number: accountNumber, swift_code: swiftCode, bank_name: bankName, beneficiary_name: beneficiaryName || user.full_name, beneficiary_address: beneficiaryAddress, beneficiary_country: beneficiaryCountry, routing_number: routingNumber || '' }
+            wirePayload: { 
+                account_number: accountNumber, swift_code: swiftCode, bank_name: bankName, 
+                beneficiary_name: beneficiaryName || user.full_name, 
+                beneficiary_address: beneficiaryAddress, 
+                beneficiary_country: beneficiaryCountry, 
+                routing_number: routingNumber || '' 
+            }
         });
 
+        // 3. Database Audit: Record transaction in 'PROCESSING' state
         await client.query(`INSERT INTO transactions (user_email, transaction_type, amount, fee, status, reference_id, currency, metadata, update_at) VALUES ($1, 'WITHDRAWAL', $2, $3, 'PROCESSING', $4, $5, $6, NOW())`,
             [email, requestedAmount, platformFee, flwRef, sourceCurrency, JSON.stringify({ target_currency: targetCurrency, bank_name: bankName })]);
 
-        // Inside router.post('/request/international')
-// Update the final success response:
-await client.query('COMMIT');
-return res.json({ 
-    success: true, 
-    message: "International payout initialized.", 
-    reference: flwRef // Ensure this key exists
-});
+        await client.query('COMMIT');
+
+        // Return the reference to the frontend
+        return res.json({ 
+            success: true, 
+            message: "International payout initialized.", 
+            reference: flwRef 
+        });
+
     } catch (err) {
         if (client) await client.query('ROLLBACK');
+        console.error(`[INTERNATIONAL_WITHDRAWAL_ERROR] Error: ${err.message}`);
         return res.status(400).json({ error: err.message });
-    } finally { if (client) client.release(); }
+    } finally { 
+        if (client) client.release(); 
+    }
+});
+
+router.get('/status/:ref', async (req, res) => {
+    try {
+        const { ref } = req.params;
+        const result = await query(
+            `SELECT status FROM transactions WHERE reference_id = $1`,
+            [ref]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ success: false });
+        
+        return res.json({ 
+            success: true, 
+            data: { status: result.rows[0].status } 
+        });
+    } catch (err) {
+        return res.status(500).json({ success: false, error: "Database error." });
+    }
 });
 
 export default router;
