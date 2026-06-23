@@ -174,12 +174,10 @@ router.get('/status/:ref', async (req, res) => {
 });
 
 // Add this to your api/index.js or relevant controller file
-app.post('/verify-account', async (req, res) => {
+router.post('/verify-account', async (req, res) => {
     const { accountNumber, bankCode } = req.body;
     
     try {
-        // Example implementation using a hypothetical Flutterwave SDK or fetch call
-        // Ensure you are using your actual secret keys from process.env
         const response = await fetch(`https://api.flutterwave.com/v3/accounts/resolve`, {
             method: 'POST',
             headers: {
@@ -200,6 +198,7 @@ app.post('/verify-account', async (req, res) => {
             res.status(400).json({ success: false, message: 'Verification failed' });
         }
     } catch (error) {
+        console.error("Verification Error:", error);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 });
