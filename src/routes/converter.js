@@ -61,75 +61,99 @@ router.get('/preview', async (req, res) => {
 });
 
 
-// POST /convert - Execute conversion with USD Limit Check
+// POST /convert - Execute International Payout
 router.post('/convert', async (req, res) => {
-    const { email, amount, fromCurrency, toCurrency } = req.body;
+    const { email, amount, fromCurrency, toCurrency, bankCode, accountNumber } = req.body;
     const numericAmount = parseFloat(amount);
     const userEmail = email.toLowerCase().trim();
     const reference = `TXN_${Date.now()}`;
     const DAILY_LIMIT_USD = 1000.00;
 
+    let client;
     try {
-        // 1. Get rate to normalize to USD for limit check
+        client = await getClient(); // Ensure connection pooling
+        
+        // 1. Rate & Limit Validation
         const rateToUSD = await getLiveRate(fromCurrency, 'USD', 1);
         const amountInUSD = numericAmount * rateToUSD;
 
-        // 2. Gatekeeper: Calculate last 24h total in USD
-        const limitRes = await query(`
+        const limitRes = await client.query(`
             SELECT COALESCE(SUM(amount * rate_to_usd), 0) as daily_total_usd 
             FROM public.transactions 
-            WHERE transaction_type = 'CONVERSION' 
+            WHERE user_email = $1 
+            AND transaction_type = 'CONVERSION' 
             AND status = 'SUCCESSFUL' 
-            AND created_at > NOW() - INTERVAL '24 hours'
-        `);
+            AND created_at > NOW() - INTERVAL '24 hours'`, [userEmail]
+        );
         
-        const currentDailyTotalUSD = parseFloat(limitRes.rows[0].daily_total_usd);
-        if (currentDailyTotalUSD + amountInUSD > DAILY_LIMIT_USD) {
-            return res.status(403).json({ 
-                message: `Daily limit reached. You have used $${currentDailyTotalUSD.toFixed(2)} of $1000 limit.` 
-            });
+        if (parseFloat(limitRes.rows[0].daily_total_usd) + amountInUSD > DAILY_LIMIT_USD) {
+            return res.status(403).json({ success: false, message: "Daily limit exceeded." });
         }
 
-        // Logic for fees
         const fielPayFee = numericAmount * 0.015;
-        const amountSentToFlw = numericAmount - fielPayFee; 
+        const amountToTransfer = numericAmount - fielPayFee;
 
-        // 3. Database Transaction
-        await query('BEGIN');
+        // 2. Start Atomic Transaction
+        await client.query('BEGIN');
         
         // Deduct from User
-        await query(
-            "UPDATE public.wallets SET available_balance = available_balance - $1 WHERE user_email = $2 AND currency = $3", 
+        const updateRes = await client.query(
+            "UPDATE public.wallets SET available_balance = available_balance - $1 WHERE user_email = $2 AND currency = $3 AND available_balance >= $1", 
             [numericAmount, userEmail, fromCurrency]
         );
+        if (updateRes.rowCount === 0) throw new Error("Insufficient funds.");
 
-        // Credit Platform Fee
-        await query(
-            "INSERT INTO wallets (user_email, currency, available_balance, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (user_email, currency) DO UPDATE SET available_balance = wallets.available_balance + EXCLUDED.available_balance",
-            ['deepxverified@gmail.com', fromCurrency, fielPayFee]
+        // Record Transaction as 'PENDING'
+        await client.query(`
+            INSERT INTO public.transactions (user_email, transaction_type, amount, fee, currency, status, reference_id, created_at, rate_to_usd) 
+            VALUES ($1, 'CONVERSION', $2, $3, $4, 'PENDING', $5, NOW(), $6)`,
+            [userEmail, numericAmount, fielPayFee, fromCurrency, reference, rateToUSD]
         );
 
-        // Log with rate_to_usd included
-        await query(`
-            INSERT INTO public.transactions 
-            (user_email, transaction_type, amount, fee, currency, status, reference_id, metadata, created_at, rate_to_usd) 
-            VALUES ($1, 'CONVERSION', $2, $3, $4, 'PENDING', $5, $6, NOW(), $7)`,
-            [userEmail, numericAmount, fielPayFee, fromCurrency, reference, JSON.stringify({ toCurrency }), rateToUSD]
-        );
+        // 3. Trigger Flutterwave Direct Transfer
+        // This maps exactly to the documentation for cross-currency payouts
+        const flwRes = await triggerDirectTransfer({
+            action: "instant",
+            payment_instruction: {
+                source_currency: fromCurrency,
+                amount: { applies_to: "source_currency", value: amountToTransfer },
+                recipient: { bank: { account_number: accountNumber, code: bankCode } },
+                destination_currency: toCurrency
+            },
+            type: "bank",
+            reference: reference
+        });
         
-        // Trigger FLW
-        const flwRes = await triggerFlutterwaveTransfer(amountSentToFlw, fromCurrency, toCurrency, reference);
-        
-        if (flwRes.status !== 'success') {
-            throw new Error("Flutterwave transfer failed");
-        }
+        if (flwRes.status !== 'success') throw new Error("Flutterwave transfer initiation failed.");
 
-        await query('COMMIT');
-        res.json({ success: true, message: "Conversion successful." });
+        await client.query('COMMIT');
+        res.json({ success: true, message: "Payout initialized.", reference });
 
     } catch (err) {
-        await query('ROLLBACK');
-        res.status(500).json({ message: "Transaction failed: " + err.message });
+        if (client) await client.query('ROLLBACK');
+        console.error(`[TXN_ERROR] ${reference}:`, err.message);
+        res.status(500).json({ success: false, message: err.message });
+    } finally {
+        if (client) client.release();
+    }
+});
+
+// Add this route to your express/node backend
+router.get('/utils/banks', async (req, res) => {
+    const { country } = req.query;
+    try {
+        const response = await fetch(`https://api.flutterwave.com/v3/banks/${country || 'NG'}`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        const data = await response.json();
+        res.status(response.status).json(data);
+    } catch (err) {
+        res.status(500).json({ status: "error", message: err.message });
     }
 });
 
