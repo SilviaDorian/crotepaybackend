@@ -127,8 +127,14 @@ router.post('/request/international', async (req, res) => {
         await client.query(`INSERT INTO transactions (user_email, transaction_type, amount, fee, status, reference_id, currency, metadata, update_at) VALUES ($1, 'WITHDRAWAL', $2, $3, 'PROCESSING', $4, $5, $6, NOW())`,
             [email, requestedAmount, platformFee, flwRef, sourceCurrency, JSON.stringify({ target_currency: targetCurrency, bank_name: bankName })]);
 
-        await client.query('COMMIT');
-        return res.json({ success: true, message: "International payout initialized." });
+        // Inside router.post('/request/international')
+// Update the final success response:
+await client.query('COMMIT');
+return res.json({ 
+    success: true, 
+    message: "International payout initialized.", 
+    reference: flwRef // Ensure this key exists
+});
     } catch (err) {
         if (client) await client.query('ROLLBACK');
         return res.status(400).json({ error: err.message });
