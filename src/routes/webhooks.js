@@ -17,8 +17,8 @@ router.post('/flutterwave', async (req, res) => {
 
     const { event, data } = req.body;
     
-    if (data?.status?.toUpperCase() !== 'SUCCESSFUL') {
-        console.log("⚠️ Webhook ignored: Status not successful.");
+    if (data?.status?.toUpperCase() !== 'SUCCESSFUL' && event !== 'transfer.failed' && event !== 'transfer.reversed') {
+        console.log("⚠️ Webhook ignored: Status not relevant.");
         return res.status(200).send('Ignored');
     }
 
@@ -28,38 +28,71 @@ router.post('/flutterwave', async (req, res) => {
         await client.query('BEGIN');
         await client.query('SET search_path TO public');
 
-        // --- PATH A: CURRENCY CONVERSION ---
+        // --- PATH A: FLUTTERWAVE TRANSFERS (CONVERSIONS OR WITHDRAWALS) ---
         if (event === 'transfer.completed') {
-            const ref = data.reference; 
-            console.log(`🔄 Finalizing conversion: ${ref}`);
+            const ref = data.reference;
             
+            if (ref.startsWith('WD-')) {
+                console.log(`🔄 Finalizing withdrawal: ${ref}`);
+                await client.query(
+                    "UPDATE transactions SET status = 'SUCCESSFUL', update_at = NOW() WHERE reference_id = $1 AND status = 'PROCESSING'",
+                    [ref]
+                );
+            } else {
+                console.log(`🔄 Finalizing conversion: ${ref}`);
+                const txRes = await client.query(
+                    "UPDATE transactions SET status = 'SUCCESSFUL', updated_at = NOW() WHERE reference_id = $1 AND status = 'PENDING' RETURNING *",
+                    [ref]
+                );
+
+                if (txRes.rowCount > 0) {
+                    const tx = txRes.rows[0];
+                    const metadata = typeof tx.metadata === 'string' ? JSON.parse(tx.metadata) : tx.metadata;
+                    const convertedAmount = parseFloat(metadata?.convertedAmount);
+                    
+                    if (!isNaN(convertedAmount)) {
+                        await client.query(
+                            `INSERT INTO wallets (user_email, currency, available_balance, updated_at)
+                             VALUES ($1, $2, $3, NOW())
+                             ON CONFLICT (user_email, currency) 
+                             DO UPDATE SET available_balance = wallets.available_balance + EXCLUDED.available_balance, updated_at = NOW()`,
+                            [tx.user_email, metadata.toCurrency, convertedAmount]
+                        );
+                    }
+                }
+            }
+        }
+
+        // --- PATH B: PAYOUT REVERSALS (ROLLBACK) ---
+        else if (event === 'transfer.failed' || event === 'transfer.reversed') {
+            const ref = data.reference;
+            console.log(`⚠️ Processing payout rollback for: ${ref}`);
+
             const txRes = await client.query(
-                "UPDATE transactions SET status = 'SUCCESSFUL', updated_at = NOW() WHERE reference_id = $1 AND status = 'PENDING' RETURNING *",
+                "SELECT user_email, amount, fee, currency FROM transactions WHERE reference_id = $1 AND status = 'PROCESSING'",
                 [ref]
             );
 
             if (txRes.rowCount > 0) {
                 const tx = txRes.rows[0];
-                const metadata = typeof tx.metadata === 'string' ? JSON.parse(tx.metadata) : tx.metadata;
-                
-                // VALIDATION: Ensure we have a valid number to credit
-                const convertedAmount = parseFloat(metadata?.convertedAmount);
-                if (isNaN(convertedAmount)) {
-                    throw new Error(`Invalid metadata for transaction ${ref}: missing or invalid convertedAmount`);
-                }
-                
                 await client.query(
-                    `INSERT INTO wallets (user_email, currency, available_balance, updated_at)
-                     VALUES ($1, $2, $3, NOW())
-                     ON CONFLICT (user_email, currency) 
-                     DO UPDATE SET available_balance = wallets.available_balance + EXCLUDED.available_balance, updated_at = NOW()`,
-                    [tx.user_email, metadata.toCurrency, convertedAmount]
+                    `UPDATE wallets SET available_balance = available_balance + $1, updated_at = NOW() 
+                     WHERE user_email = $2 AND currency = $3`,
+                    [parseFloat(tx.amount), tx.user_email, tx.currency]
                 );
-                console.log(`✅ Conversion ${ref} successful. Credited ${convertedAmount} ${metadata.toCurrency}`);
+                await client.query(
+                    `UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() 
+                     WHERE user_email = $2 AND currency = $3`,
+                    [parseFloat(tx.fee), 'deepxverified@gmail.com', tx.currency]
+                );
+                await client.query(
+                    "UPDATE transactions SET status = 'FAILED', updated_at = NOW() WHERE reference_id = $1",
+                    [ref]
+                );
             }
         }
 
-        // --- PATH B: VOUCHER DEPOSITS ---
+        // --- PATH C: VOUCHER DEPOSITS ---
         else if (event === 'charge.completed') {
             const ref = (data.meta?.parent_batch_ref || data.tx_ref)?.trim();
             const isBatch = ref?.startsWith("BATCH-");
@@ -110,8 +143,6 @@ router.post('/flutterwave', async (req, res) => {
     } catch (err) {
         if (client) await client.query('ROLLBACK');
         console.error('❌ WEBHOOK ERROR:', err);
-        // Returning 200 to Flutterwave prevents them from retrying failed logic unnecessarily 
-        // if the error is data-related, but logs the true error on your server.
         return res.status(200).send('Error logged');
     } finally {
         if (client) client.release();
