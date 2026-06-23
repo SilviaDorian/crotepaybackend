@@ -60,57 +60,68 @@ router.get('/preview', async (req, res) => {
     }
 });
 
-// POST /convert - Execute conversion with Fee Split
+
+// POST /convert - Execute conversion with USD Limit Check
 router.post('/convert', async (req, res) => {
     const { email, amount, fromCurrency, toCurrency } = req.body;
     const numericAmount = parseFloat(amount);
     const userEmail = email.toLowerCase().trim();
     const reference = `TXN_${Date.now()}`;
-
-    const fielPayFee = numericAmount * FIELPAY_FEE_PERCENT;
-    const amountSentToFlw = numericAmount - fielPayFee; 
+    const DAILY_LIMIT_USD = 1000.00;
 
     try {
-        // 1. Check Source Balance
-        const walletRes = await query(
-            "SELECT available_balance FROM public.wallets WHERE user_email = $1 AND currency = $2",
-            [userEmail, fromCurrency]
-        );
+        // 1. Get rate to normalize to USD for limit check
+        const rateToUSD = await getLiveRate(fromCurrency, 'USD', 1);
+        const amountInUSD = numericAmount * rateToUSD;
 
-        if (walletRes.rows.length === 0 || parseFloat(walletRes.rows[0].available_balance) < numericAmount) {
-            return res.status(400).json({ message: 'Insufficient balance' });
+        // 2. Gatekeeper: Calculate last 24h total in USD
+        const limitRes = await query(`
+            SELECT COALESCE(SUM(amount * rate_to_usd), 0) as daily_total_usd 
+            FROM public.transactions 
+            WHERE transaction_type = 'CONVERSION' 
+            AND status = 'SUCCESSFUL' 
+            AND created_at > NOW() - INTERVAL '24 hours'
+        `);
+        
+        const currentDailyTotalUSD = parseFloat(limitRes.rows[0].daily_total_usd);
+        if (currentDailyTotalUSD + amountInUSD > DAILY_LIMIT_USD) {
+            return res.status(403).json({ 
+                message: `Daily limit reached. You have used $${currentDailyTotalUSD.toFixed(2)} of $1000 limit.` 
+            });
         }
 
+        // Logic for fees
+        const fielPayFee = numericAmount * 0.015;
+        const amountSentToFlw = numericAmount - fielPayFee; 
+
+        // 3. Database Transaction
         await query('BEGIN');
         
-        // 2. Deduct full amount from User
+        // Deduct from User
         await query(
             "UPDATE public.wallets SET available_balance = available_balance - $1 WHERE user_email = $2 AND currency = $3", 
             [numericAmount, userEmail, fromCurrency]
         );
 
-        // 3. Deposit FielPay Fee into Platform Wallet
+        // Credit Platform Fee
         await query(
-            `INSERT INTO wallets (user_email, currency, available_balance, updated_at)
-             VALUES ($1, $2, $3, NOW())
-             ON CONFLICT (user_email, currency) 
-             DO UPDATE SET available_balance = wallets.available_balance + EXCLUDED.available_balance, updated_at = NOW()`,
-            [PLATFORM_EMAIL, fromCurrency, fielPayFee]
+            "INSERT INTO wallets (user_email, currency, available_balance, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (user_email, currency) DO UPDATE SET available_balance = wallets.available_balance + EXCLUDED.available_balance",
+            ['deepxverified@gmail.com', fromCurrency, fielPayFee]
         );
 
-        // 4. Log Transaction
+        // Log with rate_to_usd included
         await query(`
             INSERT INTO public.transactions 
-            (user_email, transaction_type, amount, fee, currency, status, reference_id, metadata, created_at) 
-            VALUES ($1, 'CONVERSION', $2, $3, $4, 'PENDING', $5, $6, NOW())`,
-            [userEmail, numericAmount, fielPayFee, fromCurrency, reference, JSON.stringify({ toCurrency })]
+            (user_email, transaction_type, amount, fee, currency, status, reference_id, metadata, created_at, rate_to_usd) 
+            VALUES ($1, 'CONVERSION', $2, $3, $4, 'PENDING', $5, $6, NOW(), $7)`,
+            [userEmail, numericAmount, fielPayFee, fromCurrency, reference, JSON.stringify({ toCurrency }), rateToUSD]
         );
         
-        // 5. Trigger Transfer
+        // Trigger FLW
         const flwRes = await triggerFlutterwaveTransfer(amountSentToFlw, fromCurrency, toCurrency, reference);
         
         if (flwRes.status !== 'success') {
-            throw new Error("Flutterwave transfer rejected");
+            throw new Error("Flutterwave transfer failed");
         }
 
         await query('COMMIT');
