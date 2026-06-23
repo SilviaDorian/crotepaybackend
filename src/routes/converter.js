@@ -145,7 +145,7 @@ router.get('/utils/banks', async (req, res) => {
         const response = await fetch(`https://api.flutterwave.com/v3/banks/${country || 'NG'}`, {
             method: 'GET',
             headers: {
-                'Authorization': `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
+                'Authorization': `Bearer ${process.env.FLW_SECRET_KEY}`,
                 'Content-Type': 'application/json'
             }
         });
