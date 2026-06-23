@@ -17,8 +17,6 @@ router.post('/flutterwave', async (req, res) => {
 
     const { event, data } = req.body;
     
-    // 1. ROUTING: Filter by event type
-    // We only process if it is a successful Charge (Voucher) or Transfer (Conversion)
     if (data?.status?.toUpperCase() !== 'SUCCESSFUL') {
         console.log("⚠️ Webhook ignored: Status not successful.");
         return res.status(200).send('Ignored');
@@ -30,7 +28,7 @@ router.post('/flutterwave', async (req, res) => {
         await client.query('BEGIN');
         await client.query('SET search_path TO public');
 
-        // --- PATH A: CURRENCY CONVERSION (transfer.completed) ---
+        // --- PATH A: CURRENCY CONVERSION ---
         if (event === 'transfer.completed') {
             const ref = data.reference; 
             console.log(`🔄 Finalizing conversion: ${ref}`);
@@ -44,31 +42,35 @@ router.post('/flutterwave', async (req, res) => {
                 const tx = txRes.rows[0];
                 const metadata = typeof tx.metadata === 'string' ? JSON.parse(tx.metadata) : tx.metadata;
                 
+                // VALIDATION: Ensure we have a valid number to credit
+                const convertedAmount = parseFloat(metadata?.convertedAmount);
+                if (isNaN(convertedAmount)) {
+                    throw new Error(`Invalid metadata for transaction ${ref}: missing or invalid convertedAmount`);
+                }
+                
                 await client.query(
                     `INSERT INTO wallets (user_email, currency, available_balance, updated_at)
                      VALUES ($1, $2, $3, NOW())
                      ON CONFLICT (user_email, currency) 
                      DO UPDATE SET available_balance = wallets.available_balance + EXCLUDED.available_balance, updated_at = NOW()`,
-                    [tx.user_email, metadata.toCurrency, Number(metadata.convertedAmount)]
+                    [tx.user_email, metadata.toCurrency, convertedAmount]
                 );
-                console.log(`✅ Conversion ${ref} successful. Credited ${metadata.convertedAmount} ${metadata.toCurrency}`);
+                console.log(`✅ Conversion ${ref} successful. Credited ${convertedAmount} ${metadata.toCurrency}`);
             }
         }
 
-        // --- PATH B: VOUCHER DEPOSITS (charge.completed) ---
+        // --- PATH B: VOUCHER DEPOSITS ---
         else if (event === 'charge.completed') {
             const ref = (data.meta?.parent_batch_ref || data.tx_ref)?.trim();
             const isBatch = ref?.startsWith("BATCH-");
 
             if (isBatch) {
-                console.log(`🔄 Attempting to lock all vouchers for batch: ${ref}`);
                 await client.query(
                     `UPDATE vouchers SET status = 'LOCKED', locked_at = NOW(), updated_at = NOW() 
                      WHERE parent_batch_ref = $1 AND status = 'PENDING'`,
                     [ref]
                 );
             } else {
-                console.log(`🔄 Attempting to lock single voucher: ${ref}`);
                 const voucherResult = await client.query(
                     `UPDATE vouchers SET status = 'LOCKED', locked_at = NOW(), updated_at = NOW() 
                      WHERE id = split_part($1, '_', 1) AND status = 'PENDING' RETURNING *`,
@@ -103,12 +105,13 @@ router.post('/flutterwave', async (req, res) => {
         }
 
         await client.query('COMMIT');
-        console.log("💾 Webhook transaction committed successfully.");
-        return res.status(200).send('Operation processed successfully');
+        return res.status(200).send('Processed');
 
     } catch (err) {
         if (client) await client.query('ROLLBACK');
         console.error('❌ WEBHOOK ERROR:', err);
+        // Returning 200 to Flutterwave prevents them from retrying failed logic unnecessarily 
+        // if the error is data-related, but logs the true error on your server.
         return res.status(200).send('Error logged');
     } finally {
         if (client) client.release();
