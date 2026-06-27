@@ -173,7 +173,7 @@ router.get('/status/:ref', async (req, res) => {
     }
 });
 
-// Add this to your api/index.js or relevant controller file
+
 router.post('/verify-account', async (req, res) => {
     const { accountNumber, bankCode } = req.body;
     
@@ -199,6 +199,28 @@ router.post('/verify-account', async (req, res) => {
         }
     } catch (error) {
         console.error("Verification Error:", error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+router.post('/banks/NG', async (req, res) => {
+    try {
+        const response = await fetch('https://api.flutterwave.com/v3/banks/NG', {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${process.env.FLW_SECRET_KEY}`
+            }
+        });
+        
+        const data = await response.json();
+        
+        if (data.status === 'success') {
+            res.status(200).json(data.data);
+        } else {
+            res.status(400).json({ success: false, message: 'Could not fetch banks' });
+        }
+    } catch (error) {
+        console.error("Bank Fetch Error:", error);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 });
