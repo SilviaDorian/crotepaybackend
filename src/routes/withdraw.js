@@ -70,8 +70,8 @@ router.post('/request/african', async (req, res) => {
         const netAmount = requestedAmount - (requestedAmount * TOTAL_DEDUCTION_PERCENT);
         const flwRef = `WD-AFR-${Date.now()}-${email.replace('@', '_at_')}`;
 
-        await client.query("UPDATE wallets SET available_balance = available_balance - $1, update_at = NOW() WHERE user_email = $2 AND currency = $3", [requestedAmount, email, sourceCurrency]);
-        await client.query("UPDATE wallets SET available_balance = available_balance + $1, update_at = NOW() WHERE user_email = $2 AND currency = $3", [platformFee, PLATFORM_EMAIL, sourceCurrency]);
+        await client.query("UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3", [requestedAmount, email, sourceCurrency]);
+        await client.query("UPDATE wallets SET available_balance = available_balance + $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3", [platformFee, PLATFORM_EMAIL, sourceCurrency]);
 
         await triggerBankTransfer({ amount: netAmount, sourceCurrency, targetCurrency, bankCode, accountNumber, reference: flwRef, isInternational: false });
 
@@ -116,8 +116,8 @@ router.post('/request/international', async (req, res) => {
         const flwRef = `WD-INT-${Date.now()}-${email.replace('@', '_at_')}`;
 
         // 1. Database Audit: Deduct and update balances
-        await client.query("UPDATE wallets SET available_balance = available_balance - $1, update_at = NOW() WHERE user_email = $2 AND currency = $3", [requestedAmount, email, sourceCurrency]);
-        await client.query("UPDATE wallets SET available_balance = available_balance + $1, update_at = NOW() WHERE user_email = $2 AND currency = $3", [platformFee, PLATFORM_EMAIL, sourceCurrency]);
+        await client.query("UPDATE wallets SET available_balance = available_balance - $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3", [requestedAmount, email, sourceCurrency]);
+        await client.query("UPDATE wallets SET available_balance = available_balance + $1, updated_at = NOW() WHERE user_email = $2 AND currency = $3", [platformFee, PLATFORM_EMAIL, sourceCurrency]);
 
         // 2. Operational Logging: Log the initiation before triggering transfer
         console.log(`[INTERNATIONAL_WITHDRAWAL_INIT] Reference: ${flwRef} | User: ${email} | Amount: ${netAmount} ${targetCurrency}`);
