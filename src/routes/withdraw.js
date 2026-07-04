@@ -18,7 +18,7 @@ const VALIDATION_RATES = {
 
 const checkMinimumLimit = (amount, currency) => {
     const targetCurrency = currency.toUpperCase();
-    if (targetCurrency === 'NGN') return amount >= 5000;
+    if (targetCurrency === 'NGN') return amount >= 100;
     const rate = VALIDATION_RATES[targetCurrency] || 1.0;
     return amount >= (50 * rate);
 };
