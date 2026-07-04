@@ -206,7 +206,7 @@ router.post('/verify-account', async (req, res) => {
 router.post('/withdraw/banks/NG', async (req, res) => {
     try {
         const response = await fetch('https://api.flutterwave.com/v3/banks/NG', {
-            method: 'GET',
+            method: 'POST',
             headers: {
                 'Authorization': `Bearer ${process.env.FLW_SECRET_KEY}`
             }
